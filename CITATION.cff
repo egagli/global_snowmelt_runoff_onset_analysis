@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: >-
+  If you use this code, please cite the dataset publication below (preferred-citation)
+  and the dataset itself (https://doi.org/10.5281/zenodo.16953614).
+type: software
+title: global_snowmelt_runoff_onset_analysis
+authors:
+  - family-names: Gagliano
+    given-names: Eric
+    email: egagli@uw.edu
+    affiliation: University of Washington
+    orcid: "https://orcid.org/0000-0002-4362-6260"
+repository-code: https://github.com/egagli/global_snowmelt_runoff_onset_analysis
+license: MIT
+preferred-citation:
+  type: article
+  title: "A global high-resolution dataset of snowmelt runoff onset timing from Sentinel-1 SAR, 2015-2024"
+  authors:
+    - family-names: Gagliano
+      given-names: Eric
+      affiliation: University of Washington
+      orcid: "https://orcid.org/0000-0002-4362-6260"
+    - family-names: Shean
+      given-names: David
+      affiliation: University of Washington
+    - family-names: Henderson
+      given-names: Scott
+      affiliation: University of Washington
+  journal: Earth System Science Data
+  year: 2026
+  volume: 18
+  start: 5871
+  end: 5894
+  doi: 10.5194/essd-18-5871-2026

@@ -1,0 +1,150 @@
+name: Pipeline Fleet
+
+# Stages 0+1 of the analysis pipeline (ancillary + tabulate -> per-tile
+# PARTIAL SUMS) as an embarrassingly-parallel GitHub Actions fleet — the
+# production repo's icechunk fleet pattern (docs/icechunk-github-actions-pattern.md)
+# adapted to blob-existence ledgers:
+#   stage 0 done = marker in ancillary/<grid>/_complete/   (flat, 1 list call)
+#   stage 1 done = tile partials parquet blob exists       (atomic single blob)
+# The per-pixel parquet is an opt-in product (keep_pixels) — the reduce
+# (pipeline/scripts/reduce_partials.py, local) needs only the partials.
+# Failure = no output = re-listed on the next dispatch; re-dispatch until the
+# plan job reports 0 remaining. ~4,320 tiles, <= 256 matrix jobs per run.
+#
+# Runs on the GitHub-hosted runners of this public repository with the repository
+# secrets AZURE_STORAGE_SAS_TOKEN, AZURE_STORAGE_ACCOUNT and EE_SERVICE_ACCOUNT_KEY
+# (workflow_dispatch only; forks never receive them). One fleet run per config
+# file at a time (concurrency group): two overlapping runs would race on the
+# same tile blobs. The production repo is checked out at a pinned commit.
+on:
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: 'Tiles per matrix job'
+        required: false
+        default: '36'
+        type: string
+      max_batches:
+        description: 'Cap batches this run (0 = no cap; 1 = smoke test)'
+        required: false
+        default: '0'
+        type: string
+      config_file:
+        description: 'Config file (resolved inside the production clone)'
+        required: false
+        default: 'config/global_config_v10.txt'
+        type: string
+      keep_pixels:
+        description: 'Also write the per-pixel parquet per tile (opt-in, ~150 GB for the grid)'
+        required: false
+        default: false
+        type: boolean
+permissions:
+  contents: read
+
+concurrency:
+  group: fleet-${{ inputs.config_file }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"   # keep stdout/stderr interleaved in job logs
+  # the production package (Config, store access, plot_utils) is pinned to a commit, never a
+  # branch: that repository is read-only from here. Mirrored in the pixi.toml comment.
+  PRODUCTION_REPO_SHA: 18992fa7018d517a23f5507b28ec80edba2d0482
+  AZURE_STORAGE_SAS_TOKEN: ${{ secrets.AZURE_STORAGE_SAS_TOKEN }}
+  AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: global_snowmelt_runoff_onset_analysis
+
+      - name: Checkout production repo (side-by-side, required by the pixi env and Config; pinned commit)
+        uses: actions/checkout@v4
+        with:
+          repository: egagli/global_snowmelt_runoff_onset
+          ref: ${{ env.PRODUCTION_REPO_SHA }}
+          path: global_snowmelt_runoff_onset
+
+      - uses: prefix-dev/setup-pixi@v0.8.0
+        with:
+          pixi-version: v0.65.0
+          manifest-path: global_snowmelt_runoff_onset_analysis/pixi.toml
+          environments: ci
+          cache: true
+
+      - name: Derive remaining work from the blob ledger
+        id: plan
+        working-directory: global_snowmelt_runoff_onset_analysis
+        run: |
+          pixi run -e ci python pipeline/scripts/get_remaining_work.py \
+            --config "${{ inputs.config_file }}" \
+            --batch-size "${{ inputs.batch_size }}" \
+            --max-batches "${{ inputs.max_batches }}" \
+            --manifest-out "$GITHUB_WORKSPACE/fleet_manifest.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fleet-manifest
+          path: fleet_manifest.json
+
+  process:
+    needs: plan
+    if: fromJson(needs.plan.outputs.count) > 0
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false        # one bad tile must not kill the fleet
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      MALLOC_ARENA_MAX: "2"   # cap glibc arena creep on long multi-tile jobs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: global_snowmelt_runoff_onset_analysis
+
+      - name: Checkout production repo (side-by-side, required by the pixi env and Config; pinned commit)
+        uses: actions/checkout@v4
+        with:
+          repository: egagli/global_snowmelt_runoff_onset
+          ref: ${{ env.PRODUCTION_REPO_SHA }}
+          path: global_snowmelt_runoff_onset
+
+      - uses: prefix-dev/setup-pixi@v0.8.0
+        with:
+          pixi-version: v0.65.0
+          manifest-path: global_snowmelt_runoff_onset_analysis/pixi.toml
+          environments: ci
+          cache: true
+
+      - name: Restore vector-source cache (GMBA / continents / BasinATLAS)
+        uses: actions/cache@v4
+        with:
+          path: global_snowmelt_runoff_onset_analysis/data/geometries/sources
+          key: vector-sources-v1
+
+      - name: Write Earth Engine service key
+        run: |
+          printf '%s' "$EE_KEY" > global_snowmelt_runoff_onset/config/ee_key.json
+        env:
+          EE_KEY: ${{ secrets.EE_SERVICE_ACCOUNT_KEY }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: fleet-manifest
+
+      - name: Process batch ${{ matrix.batch_index }}
+        working-directory: global_snowmelt_runoff_onset_analysis
+        run: |
+          pixi run -e ci python pipeline/scripts/run_fleet_batch.py \
+            --config "${{ inputs.config_file }}" \
+            --manifest "$GITHUB_WORKSPACE/fleet_manifest.json" \
+            --batch ${{ matrix.batch_index }} \
+            ${{ inputs.keep_pixels && '--keep-pixels' || '' }}

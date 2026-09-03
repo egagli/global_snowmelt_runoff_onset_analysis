@@ -1,0 +1,60 @@
+name: CI
+
+# Smoke test without secrets: the ci environment solves, the package imports, and the reduce runs
+# on two tracked fixture tiles (tests/README.md). Runs on every push and pull request.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  # the production package is pinned to a commit, never a branch (the repository is read-only from here)
+  PRODUCTION_REPO_SHA: 18992fa7018d517a23f5507b28ec80edba2d0482
+
+jobs:
+  reduce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: global_snowmelt_runoff_onset_analysis
+
+      - name: Checkout production repo (side-by-side, required by the pixi env and Config)
+        uses: actions/checkout@v4
+        with:
+          repository: egagli/global_snowmelt_runoff_onset
+          ref: ${{ env.PRODUCTION_REPO_SHA }}
+          path: global_snowmelt_runoff_onset
+
+      - uses: prefix-dev/setup-pixi@v0.8.0
+        with:
+          pixi-version: v0.65.0
+          manifest-path: global_snowmelt_runoff_onset_analysis/pixi.toml
+          environments: ci
+          cache: true
+
+      - name: Restore vector-source cache (GMBA / continents)
+        uses: actions/cache@v4
+        with:
+          path: global_snowmelt_runoff_onset_analysis/data/geometries/sources
+          key: vector-sources-ci-v1
+
+      - name: Import the package
+        working-directory: global_snowmelt_runoff_onset_analysis
+        run: pixi run -e ci python -c "import gsro_analysis.aggregate, gsro_analysis.datacube, gsro_analysis.era5; print('ok')"
+
+      - name: Reduce the fixture partials (no credentials)
+        working-directory: global_snowmelt_runoff_onset_analysis
+        env:
+          GSRO_AGGREGATED_ROOT: ${{ github.workspace }}/global_snowmelt_runoff_onset_analysis/tests/fixtures/aggregated_results
+        run: |
+          pixi run -e ci python pipeline/scripts/reduce_partials.py --no-download
+          test -s tests/fixtures/aggregated_results/v10/mountain_ranges/all_mountain_ranges_fcf_lte_50.nc
+          test -s tests/fixtures/aggregated_results/v10/river_basins/all_river_basins_fcf_lte_50.nc
+          test -s tests/fixtures/aggregated_results/v10/continents/all_continents_full_dataset.nc

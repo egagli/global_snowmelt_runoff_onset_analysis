@@ -1,0 +1,99 @@
+[workspace]
+name = "global-snowmelt-runoff-onset-analysis"
+version = "0.1.0"
+description = "Analyses of the global snowmelt runoff onset dataset: map/reduce aggregation pipeline and notebooks"
+authors = ["Eric Gagliano <egagli@uw.edu>"]
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64"]
+
+# Two features: `pipeline` is everything the fleet worker, the ERA5 acquisition and the local
+# reduce need (the `ci` environment the GitHub Actions jobs install); `analysis` adds the
+# plotting/statistics stack of the notebooks. The default environment has both plus jupyter.
+
+[dependencies]
+python = ">=3.12"
+
+[feature.pipeline.dependencies]
+# core
+numpy = "*"
+pandas = "*"
+xarray = "*"
+scipy = "*"
+dask = "*"
+pyarrow = "*"
+bottleneck = "*"
+flox = "*"
+tqdm = "*"
+requests = "*"
+# IO / formats
+zarr = "*"
+netcdf4 = "*"
+h5netcdf = "*"
+fsspec = "*"
+cftime = "*"
+pooch = "*"
+icechunk = ">=2,<3"
+obstore = ">=0.11.1,<0.12"
+# geospatial
+geopandas = "*"
+shapely = "*"
+pyproj = "*"
+rasterio = "*"
+rioxarray = "*"
+odc-stac = ">=0.4"
+odc-geo = "*"
+geocube = "*"
+xdem = "*"
+# data access / cloud
+adlfs = "*"
+azure-storage-blob = "*"
+planetary-computer = "*"
+pystac = "*"
+pystac-client = "*"
+earthengine-api = "*"
+# easysnowdata <=0.0.24 passes geometry=/projection= to xee, an API removed in xee 0.1 — keep both pins
+# together until easysnowdata >=0.0.25 is on conda-forge
+easysnowdata = ">=0.0.24,<0.0.25"
+xee = ">=0.0.15,<0.1"
+
+[feature.analysis.dependencies]
+matplotlib = "*"
+seaborn = ">=0.13.2,<0.14"
+cartopy = ">=0.25.0,<0.26"
+matplotlib-scalebar = ">=0.9.0,<0.10"
+contextily = "*"
+mapclassify = "*"
+xyzservices = "*"
+statsmodels = "*"
+scikit-learn = "*"
+pymannkendall = "*"
+libpysal = ">=4.15.0,<5"
+pillow = "*"
+
+[feature.dev.dependencies]
+jupyterlab = "*"
+ipykernel = "*"
+ipywidgets = "*"
+nbconvert = "*"
+nbstripout = ">=0.9.1,<0.10"
+
+[pypi-dependencies]
+# the production package, installed editable from the SIDE-BY-SIDE clone (see README: Setup).
+# That repository is read-only from here; the workflows and CI check it out at the commit
+#   18992fa7018d517a23f5507b28ec80edba2d0482   (main on 2026-09-01)
+# — keep this comment and the PRODUCTION_REPO_SHA env in .github/workflows/*.yml in step.
+global-snowmelt-runoff-onset = { path = "../global_snowmelt_runoff_onset", editable = true }
+gsro-analysis = { path = ".", editable = true }
+
+[environments]
+default = { features = ["pipeline", "analysis", "dev"] }
+# slim env for the GitHub Actions jobs (fleet, ERA5 acquire, CI reduce): no plotting, no jupyter
+ci = { features = ["pipeline"] }
+
+[tasks]
+lab = "jupyter lab"
+setup-kernel = "python -m ipykernel install --user --name gsro-analysis --display-name 'gsro-analysis (pixi)'"
+# the local stages, in order (each idempotent; `pixi run reduce -- --mirror` copies the cubes to Azure)
+era5-zonal = "python pipeline/scripts/era5_zonal.py"
+reduce = "python pipeline/scripts/reduce_partials.py"
+metrics = "python pipeline/scripts/range_metrics.py"
