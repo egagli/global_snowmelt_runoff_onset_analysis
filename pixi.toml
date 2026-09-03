@@ -51,10 +51,15 @@ planetary-computer = "*"
 pystac = "*"
 pystac-client = "*"
 earthengine-api = "*"
-# easysnowdata <=0.0.24 passes geometry=/projection= to xee, an API removed in xee 0.1 — keep both pins
-# together until easysnowdata >=0.0.25 is on conda-forge
-easysnowdata = ">=0.0.24,<0.0.25"
-xee = ">=0.0.15,<0.1"
+# xee >= 0.1 takes an explicit pixel grid (crs, crs_transform, shape_2d) instead of geometry=/projection=,
+# so requests land exactly on a source's native lattice. easysnowdata 0.0.25 (PyPI only, 2026) follows it;
+# <= 0.0.24 anchored the xee grid on the bbox corner, half a pixel off the CHILI lattice (measured
+# 2026-09-03 on tile 016_152: a nearest-neighbour resample of a grid shifted 0.46/0.51 px), which is why
+# the v9-era CHILI layers differ from the native values. The v10 fleet builds CHILI on the native grid.
+xee = ">=0.1.2,<0.2"
+
+[feature.pipeline.pypi-dependencies]
+easysnowdata = ">=0.0.25"
 
 [feature.analysis.dependencies]
 matplotlib = "*"

@@ -30,7 +30,7 @@ Credentials, all resolved automatically:
 
 | Credential | Needed for | Source |
 | --- | --- | --- |
-| Azure SAS token | the dataset store and every Azure product (ancillary, partials, ERA5, mirrored cubes) | `../global_snowmelt_runoff_onset/config/sas_token.txt` or `AZURE_STORAGE_SAS_TOKEN` |
+| Azure SAS token | the dataset store and every Azure product (ancillary, partials, the ERA5-Land repo, mirrored cubes) | `../global_snowmelt_runoff_onset/config/sas_token.txt` or `AZURE_STORAGE_SAS_TOKEN` |
 | Earth Engine service key | CHILI (ancillary build), ERA5-Land acquisition, the GTOPO30 histogram rebuild, `river_basins/snow_water` | `../global_snowmelt_runoff_onset/config/ee_key.json`, via `settings.initialize_earthengine()` (works headless) |
 | none | the public multiscale pyramid, every notebook that reads only the local cubes and tables, the Evan & Eisenman comparison | — |
 
@@ -40,7 +40,7 @@ Compute is local or GitHub Actions; there is no cluster service.
 
 ```text
 gsro_analysis/        the package (table below)
-pipeline/             scripts/ (fleet worker, dispatcher, ERA5 fetch, zonal join, reduce, metrics),
+pipeline/             scripts/ (fleet worker, dispatcher, ERA5-Land store, zonal join, reduce, metrics),
                       pipeline.ipynb (state, reset, work list + dispatch, one tile end to end, local
                       stages), tile_data/ (the fleet work list); README.md = mechanics
 analyses/<unit>/      one folder per aggregation unit (global = continents cube, mountain_ranges,
@@ -70,14 +70,15 @@ and `GSRO_OUTPUT_ROOT` redirect the cubes and the figures/results to a test set.
 ```text
  GitHub Actions fleet (per tile, ~2.5 min; pipeline_fleet.yml -> scripts/run_fleet_batch.py)
    stage 0  ancillary raster     Cop-DEM, CHILI (EE), snow class, WorldCover, FCF, GMBA / HydroBASINS level-6 /
-                                 continent ids -> Azure analysis/ancillary/<grid>/tile_RRR_CCC.zarr (once per GRID)
+                                 continent ids -> Azure snowmelt_runoff_onset_analysis/ancillary/<grid>/tile_RRR_CCC.zarr (once per GRID)
    stage 1  tabulate (in memory) store tile window -> reproject_match onto the ancillary -> pixel table
             map                  -> PARTIAL SUMS per (filter, unit, bins, CHILI class)
-                                 -> Azure analysis/partials/<version>/tile_RRR_CCC.parquet (~0.1-1 MB/tile)
-            [--keep-pixels]      -> Azure analysis/parquets/<version>/tile_RRR_CCC.parquet (opt-in pixel table)
+                                 -> Azure snowmelt_runoff_onset_analysis/partials/<version>/tile_RRR_CCC.parquet (~0.1-1 MB/tile)
+            [--keep-pixels]      -> Azure snowmelt_runoff_onset_analysis/parquets/<version>/tile_RRR_CCC.parquet (opt-in pixel table)
 
- ERA5 Acquire workflow (era5_acquire.yml -> scripts/fetch_era5.py; 16 GB runner)
-            ERA5-Land monthly (EE) -> Azure analysis/era5_data/<version>/ (year stores + anomaly store)
+ ERA5 Acquire workflow (era5_acquire.yml -> scripts/era5_land.py; one job per water year)
+            ERA5-Land monthly (EE, native 0.1 deg grid) -> Azure snowmelt_runoff_onset_analysis/era5_land/<version>/era5_land
+                                 (ONE icechunk repo: one commit per water year + the anomaly group; the commit history is the ledger)
 
  local (minutes each; pixi run era5-zonal / reduce / metrics)
    stage 2  scripts/era5_zonal.py       anomaly store x (GMBA, HydroBASINS) polygons -> era5_zonal/*.nc
@@ -114,7 +115,8 @@ applies the analyses' rules in one call.
 
 ## Running a dataset version
 
-1. **ERA5-Land**: dispatch `ERA5 Acquire` (`water_years`, optional `copy_from_version`, `build_anomaly`).
+1. **ERA5-Land**: dispatch `ERA5 Acquire` (no inputs needed: it creates the version's store if missing, fetches
+   only the water years without a commit, then builds the anomaly group; `start_fresh` deletes the store first).
 2. **Fleet**: dispatch `Pipeline Fleet` (`max_batches=1` first as a smoke test, then `0`); re-dispatch
    until the plan job reports 0 remaining. Failure = no output, so a failed tile is simply re-listed.
 3. **Local stages**: `pixi run era5-zonal`, `pixi run reduce` (add `-- --mirror` to copy the cubes to
@@ -135,7 +137,7 @@ and its marker) and re-dispatch; stages 2 and 3 overwrite. A change of a unit de
 | [settings.py](gsro_analysis/settings.py) | the one place the dataset version is chosen; Azure prefixes; external source URLs (GMBA, BasinATLAS, continents, forest cover, snow class); Earth Engine init; `cached_source` |
 | [datacube.py](gsro_analysis/datacube.py) | per-tile UTM ancillary construction and compact save, `refresh_unit_layers`, tabulation, `process_tile` (the fleet job), partials/pixel-table writers, ledgers, `reset_version` (dry run by default) |
 | [aggregate.py](gsro_analysis/aggregate.py) | `FILTERS`, `UNIT_TYPES`, `GROUPS`; the map `tile_partials` and the reduce `reduce_partials`; `open_aggregate`, `weighted_mean`, `collapse`, `threshold`, `elevation_relative`; range names and metadata; the GTOPO30 histogram |
-| [era5.py](gsro_analysis/era5.py) | ERA5-Land acquisition with verified stores, `open_era5_stack`, `open_anomaly`, the zonal join `zonal_anomalies`, Equal Earth on the fly |
+| [era5.py](gsro_analysis/era5.py) | the ERA5-Land icechunk store: template, native-grid acquisition (`acquire_water_year`), commit ledger (`status`), `build_anomaly`, `open_era5_land`, `open_anomaly`, the zonal join `zonal_anomalies`, Equal Earth on the fly, `pixelwise_correlations` |
 | [stats.py](gsro_analysis/stats.py) | `prepare_mountain_ranges`, `basin_summary`, two lapse-rate definitions, `spring_temperature_sensitivity`, `climate_regressions`, `range_metrics_gdf` |
 | [results.py](gsro_analysis/results.py) | `save_result_table`: the production helper plus `_analysis_git_sha` |
 | [plotting.py](gsro_analysis/plotting.py), [colorbars.py](gsro_analysis/colorbars.py) | polar triplets and anomaly panels; annotated colorbars as presets over the production `plot_utils` |

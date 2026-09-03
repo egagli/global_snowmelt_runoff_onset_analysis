@@ -125,15 +125,17 @@ def load_config(config_file=None):
 # the production Config). <version> is config.version; the ancillary store
 # is keyed by GRID generation, not dataset version — it only changes when
 # the grid does.
-ANCILLARY_PREFIX = "snowmelt/analysis/ancillary"                # + /<grid>/tile_RRR_CCC.zarr
-PARTIALS_PREFIX = "snowmelt/analysis/partials"                  # + /<version>/tile_RRR_CCC.parquet  (the fleet product)
-ANALYSIS_PARQUET_PREFIX = "snowmelt/analysis/parquets"          # + /<version>/tile_RRR_CCC.parquet  (opt-in pixel tables)
-ERA5_DATA_PREFIX = "snowmelt/analysis/era5_data"                # + /<version>
-AGGREGATED_PREFIX = "snowmelt/analysis/aggregated"              # + /<version>/  (mirror of aggregated_results/<version>)
+ANCILLARY_PREFIX = "snowmelt/snowmelt_runoff_onset_analysis/ancillary"        # + /<grid>/tile_RRR_CCC.zarr
+PARTIALS_PREFIX = "snowmelt/snowmelt_runoff_onset_analysis/partials"          # + /<version>/tile_RRR_CCC.parquet  (the fleet product)
+ANALYSIS_PARQUET_PREFIX = "snowmelt/snowmelt_runoff_onset_analysis/parquets"  # + /<version>/tile_RRR_CCC.parquet  (opt-in pixel tables)
+ERA5_LAND_PREFIX = "snowmelt/snowmelt_runoff_onset_analysis/era5_land"        # + /<version>/era5_land  (ONE icechunk repo: acquisition + anomaly group)
+AGGREGATED_PREFIX = "snowmelt/snowmelt_runoff_onset_analysis/aggregated"      # + /<version>/  (mirror of aggregated_results/<version>)
 
 
 # v9 per-tile parquets: kept ONLY as the validation reference for the
-# tile-for-tile comparison in pipeline/pipeline.ipynb (v9 tile (r, c) == v10 tile (r+2, c))
+# tile-for-tile comparison in pipeline/pipeline.ipynb (v9 tile (r, c) == v10 tile (r+2, c)).
+# They physically live under the pre-2026-09-03 prefix (snowmelt/analysis/), which is
+# otherwise retired; nothing is written there any more.
 V9_TILE_PARQUET_PREFIX = "snowmelt/analysis/parquets/tiles/v9"
 
 # external vector/raster sources

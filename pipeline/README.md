@@ -9,11 +9,11 @@ levels and the CHILI axis: [docs/aggregation_lineage.md](../docs/aggregation_lin
 
 | Stage | Where | Entry point | Reads | Writes |
 | --- | --- | --- | --- | --- |
-| 0 ancillary (once per **grid**) | fleet job | `scripts/run_fleet_batch.py` | Cop-DEM, CHILI (EE), snow class, WorldCover, FCF, GMBA, BasinATLAS level 6, continents | `snowmelt/analysis/ancillary/<version>_grid/tile_RRR_CCC.zarr` (compact int encodings, ~8 MB) + `_complete/tile_RRR_CCC.json` |
-| 1 tabulate + map (per dataset **version**) | same fleet job | `scripts/run_fleet_batch.py` → `datacube.process_tile` | icechunk store tile window + the ancillary zarr | `snowmelt/analysis/partials/<version>/tile_RRR_CCC.parquet` — partial sums for both filter tags × three unit types (~0.1–1 MB). `--keep-pixels`: also the pixel table `snowmelt/analysis/parquets/<version>/tile_RRR_CCC.parquet` (~35 MB) |
-| ERA5 | `ERA5 Acquire` workflow (16 GB runner) | `scripts/fetch_era5.py` | ERA5-Land monthly (EE) | `snowmelt/analysis/era5_data/<version>/…` (year stores + anomaly store, verified + marked) |
+| 0 ancillary (once per **grid**) | fleet job | `scripts/run_fleet_batch.py` | Cop-DEM, CHILI (EE), snow class, WorldCover, FCF, GMBA, BasinATLAS level 6, continents | `snowmelt/snowmelt_runoff_onset_analysis/ancillary/<version>_grid/tile_RRR_CCC.zarr` (compact int encodings, ~8 MB) + `_complete/tile_RRR_CCC.json` |
+| 1 tabulate + map (per dataset **version**) | same fleet job | `scripts/run_fleet_batch.py` → `datacube.process_tile` | icechunk store tile window + the ancillary zarr | `snowmelt/snowmelt_runoff_onset_analysis/partials/<version>/tile_RRR_CCC.parquet` — partial sums for both filter tags × three unit types (~0.1–1 MB). `--keep-pixels`: also the pixel table `snowmelt/snowmelt_runoff_onset_analysis/parquets/<version>/tile_RRR_CCC.parquet` (~35 MB) |
+| ERA5 | `ERA5 Acquire` workflow (one job per water year) | `scripts/era5_land.py` | ERA5-Land monthly (EE, `ee.data.computePixels` on the native 0.1° grid) | `snowmelt/snowmelt_runoff_onset_analysis/era5_land/<version>/era5_land` — ONE icechunk repository: the 8 variables on `(water_year, month, latitude, longitude)`, one commit per water year, plus the `anomaly` group (one commit); the commit history is the ledger |
 | 2 ERA5 zonal | local | `scripts/era5_zonal.py` | anomaly store, GMBA + BasinATLAS polygons (level 5; `--units river_basins_l6` for level 6), pyramid masks | `aggregated_results/<version>/era5_zonal/era5_anomaly_<unit_type>.nc` |
-| 2 reduce | local | `scripts/reduce_partials.py` | the partials (auto-cached locally), GMBA/continents, `data/gtopo30_lat_elev_histogram.nc`, the zonal files | `aggregated_results/<version>/<group>/all_<group>_<filter>.nc` (`--groups` adds `river_basins_l6`, `continents_aspect`; `--mirror` → `snowmelt/analysis/aggregated/<version>/`) |
+| 2 reduce | local | `scripts/reduce_partials.py` | the partials (auto-cached locally), GMBA/continents, `data/gtopo30_lat_elev_histogram.nc`, the zonal files | `aggregated_results/<version>/<group>/all_<group>_<filter>.nc` (`--groups` adds `river_basins_l6`, `continents_aspect`; `--mirror` → `snowmelt/snowmelt_runoff_onset_analysis/aggregated/<version>/`) |
 | 3 metrics | local | `scripts/range_metrics.py` | the mountain-range cube | `analyses/mountain_ranges/results/<version>/mountain_range_metrics.csv` |
 
 ## What a "partials" row is
@@ -84,13 +84,22 @@ the production repo's icechunk fleet pattern adapted to blob-existence ledgers:
   failure raises (failure = no output, never wrong output).
 - **memory**: the tabulate step peaks at ~3–4 GB per tile; fine on the 16 GB public runners.
 
-## ERA5 for a new version
+## The ERA5-Land store
 
-The per-water-year stores are version-independent acquisitions: either server-side copy the
-existing years to `era5_data/<version>/` and fetch only the new year(s) (`ERA5 Acquire` with
-`copy_from_version`), or refetch every year from Earth Engine; then build the anomaly store (base
-period = all water years in the stack, recorded in attrs), then rerun `scripts/era5_zonal.py` and
-`scripts/reduce_partials.py`.
+One icechunk repository per dataset version (`gsro_analysis/era5.py`), the production repo's fleet
+pattern applied to eleven work units: the `ERA5 Acquire` workflow's plan job creates the repository
+with an empty, all-NaN template if it does not exist (every water year of the config, 9 hemisphere-aware
+months, the native 1800 × 3600 grid with cell centres at multiples of 0.1°, north-down), folds the
+commit history to list the water years without a commit, and runs one job per missing year; each job
+fetches its year from Earth Engine (`ee.data.computePixels`, one float32 band per half-globe request, no
+resampling), writes its chunks (one chunk = one variable × year × month, so concurrent jobs never touch
+the same chunk) and makes ONE commit with QA metadata. The anomaly job then builds the `anomaly` group
+(every variable minus its per-pixel median over all water years) once every year is committed, and
+skips when it is current; a year committed after the anomaly marks it stale. A failed job commits
+nothing; re-dispatch until nothing remains. Acquisitions are never copied between versions; a new
+version re-acquires everything (~5 min per year in parallel, ~20 min for the anomaly). Then
+`scripts/era5_zonal.py --overwrite` and `scripts/reduce_partials.py` rerun. `start_fresh` (off by
+default) deletes the version's repository first — the only deletion the workflow can make.
 
 ## Validation aids
 

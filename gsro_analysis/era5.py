@@ -1,38 +1,53 @@
-"""ERA5-Land acquisition and derived products — the minimal set.
+"""ERA5-Land for the analyses: ONE icechunk repository per dataset version.
 
-Exactly two standing stores per dataset version (on Azure under
-``settings.ERA5_DATA_PREFIX/<version>/``), plus the tiny WeatherBench2
-climatology cache the temperature_sensitivity notebook keeps locally:
+Layout on Azure — ``settings.ERA5_LAND_PREFIX/<version>/era5_land`` is an icechunk
+repository (Zarr v3 inside; open it with :func:`open_era5_land`, never as a plain
+zarr path):
 
-1. ``era5_water_year_<yr>.zarr`` — the canonical acquisition: native 0.1°
-   lat/lon, monthly, 9 hemisphere-aware months per water year
-   (:data:`MONTH_LABELS`), 8 variables (:data:`VARIABLES`).
-2. ``era5_land_anomaly_ds.zarr`` — monthly anomalies vs the median over a
-   recorded base period; feeds the per-range/per-basin temperature
-   sensitivity via :func:`zonal_anomalies`.
+    /            the acquisition: the 8 ERA5-Land monthly variables (:data:`VARIABLES`) on
+                 ``(water_year, month, latitude, longitude)`` — every water year of
+                 ``config.water_years``, 9 hemisphere-aware months (:data:`MONTH_LABELS`),
+                 the NATIVE 0.1° grid: 1800 x 3600 cells centred at multiples of 0.1°,
+                 north-down (:data:`LATITUDE` 89.9..-90.0, :data:`LONGITUDE` -180.0..179.9;
+                 the +90° row is Arctic Ocean, which ERA5-Land does not cover, and the
+                 +180° column duplicates -180°)
+    /anomaly     the same layout minus the per-pixel median over ALL water years (the
+                 base period is in the group attrs and in the commit metadata)
 
-Everything else that used to be materialized (the Equal-Earth family:
-``combined_runoff_onset_and_era5_eqearth{,_anomaly}_ds``, the local 10-yr
-eqearth stacks, the mountain-masked anomaly variant, the 6-month local
-per-WY mirrors) is retired — derive on the fly with
-:func:`combined_anomaly_eqearth` / :func:`to_equal_earth` instead
-(2026-08-24 decision). Layouts are versioned; code assumes >= v10.
+The repository IS the ledger (the production repo's icechunk fleet pattern,
+``docs/icechunk-github-actions-pattern.md`` there): the store is initialized
+once as an empty template (:func:`initialize`), every water year is ONE commit
+carrying machine-readable metadata (:func:`write_water_year`; one chunk = one
+variable x water year x month, so concurrent year jobs never touch the same
+chunk and their commits rebase automatically), the anomaly is one commit
+(:func:`build_anomaly`), and "what remains" is a fold over the commit history
+(:func:`status`). A failed job commits nothing and its year is simply re-listed
+by the next dispatch. Acquisitions are never copied between dataset versions.
 
-Acquisition needs Earth Engine (``settings.initialize_earthengine()``,
-service-account key — works headless) and the ``xee < 0.1`` pin that
-easysnowdata's ``get_era5`` requires.
+Acquisition goes through xee >= 0.1 with the collection's native grid given
+explicitly (:data:`NATIVE_GRID`), so every value is the asset's own, never a
+resample: the pre-2026-09-03 per-year stores were a nearest-neighbour resample
+half a cell off this grid. One variable x hemisphere window is in memory at a
+time (~230 MB); a water year takes about a minute.
+
+Needs Earth Engine (``settings.initialize_earthengine()``, service-account key,
+works headless) and the Azure SAS token (through the production ``Config``).
 """
 
+import random
+import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 
-import easysnowdata
 import numpy as np
 import xarray as xr
 
 from gsro_analysis import settings
 
-# 9 hemisphere-aware months per water year: NH Dec(wy-1)-Aug(wy),
-# SH Jun(wy)-Feb(wy+1), both labeled winter -> spring -> summer.
+EE_COLLECTION = "ECMWF/ERA5_LAND/MONTHLY_AGGR"
+
+# 9 hemisphere-aware months per water year: NH Dec(wy-1)-Aug(wy), SH Jun(wy)-Feb(wy+1),
+# both labeled winter -> spring -> summer; cells with latitude >= 0 carry the NH window.
 MONTH_LABELS = ['winter_month_1', 'winter_month_2', 'winter_month_3',
                 'spring_month_1', 'spring_month_2', 'spring_month_3',
                 'summer_month_1', 'summer_month_2', 'summer_month_3']
@@ -46,18 +61,395 @@ VARIABLES = ["temperature_2m",
              "surface_solar_radiation_downwards_sum",
              "surface_thermal_radiation_downwards_sum"]
 
+# units per the ERA5-Land monthly aggregates catalog entry (the bands carry none)
+VARIABLE_ATTRS = {
+    "temperature_2m": {"units": "K", "long_name": "2 m air temperature, monthly mean"},
+    "dewpoint_temperature_2m": {"units": "K", "long_name": "2 m dewpoint temperature, monthly mean"},
+    "snow_depth_water_equivalent": {"units": "m of water equivalent",
+                                    "long_name": "snow depth water equivalent, monthly mean"},
+    "snowfall_sum": {"units": "m of water equivalent", "long_name": "snowfall, monthly sum of daily totals"},
+    "surface_latent_heat_flux_sum": {"units": "J m-2", "long_name": "surface latent heat flux, monthly sum"},
+    "surface_sensible_heat_flux_sum": {"units": "J m-2", "long_name": "surface sensible heat flux, monthly sum"},
+    "surface_solar_radiation_downwards_sum": {"units": "J m-2",
+                                              "long_name": "surface solar radiation downwards, monthly sum"},
+    "surface_thermal_radiation_downwards_sum": {"units": "J m-2",
+                                                "long_name": "surface thermal radiation downwards, monthly sum"},
+}
+DATA_CITATION = ("Muñoz Sabater, J. (2019): ERA5-Land monthly averaged data from 1950 to present. "
+                 "Copernicus Climate Change Service (C3S) Climate Data Store (CDS), doi:10.24381/cds.68d2bb30; "
+                 "accessed through Google Earth Engine " + EE_COLLECTION)
+
+# the native grid (Earth Engine's crs_transform for the collection is
+# [0.1, 0, -180.05, 0, -0.1, 90.05] over 3601 x 1801 pixels; see the module docstring)
+RES = 0.1
+N_LAT, N_LON = 1800, 3600
+LATITUDE = np.round(89.9 - RES * np.arange(N_LAT), 1)       # north-down, cell centres
+LONGITUDE = np.round(-180.0 + RES * np.arange(N_LON), 1)
+CRS_TRANSFORM = [RES, 0, -180.05, 0, -RES, 89.95]           # upper-left corner of the stored grid
+DIMS = ("water_year", "month", "latitude", "longitude")
+CHUNKS = (1, 1, N_LAT, N_LON)                               # one chunk = one variable x year x month (~26 MB raw)
+
+ANOMALY_GROUP = "anomaly"
+BRANCH = "main"
+SCHEMA = 1
+KIND_INIT, KIND_WATER_YEAR, KIND_ANOMALY = "init", "water_year", "anomaly"
+COMMIT_MAX_TRIES = 6
+
+
+# the collection's native grid as xee >= 0.1 wants it (== xee.helpers.extract_grid_params(collection)):
+# 3601 x 1801 pixels, row 0 = latitude 90.0 (dropped: Arctic Ocean), column 3600 = +180.0 (dropped: duplicate)
+NATIVE_GRID = {'crs': 'EPSG:4326', 'crs_transform': (RES, 0, -180.05, 0, -RES, 90.05), 'shape_2d': (N_LON + 1, N_LAT + 1)}
+
 
 # ---------------------------------------------------------------------------
-# paths (versioned under ERA5_DATA_PREFIX/<version>/)
+# the repository
 
-def water_year_store_path(config, water_year):
-    return (f"{settings.ERA5_DATA_PREFIX}/{config.version}/"
-            f"era5_water_year_{water_year}.zarr")
+def repo_prefix(config):
+    """Container-qualified Azure prefix of the version's icechunk repository."""
+    return f"{settings.ERA5_LAND_PREFIX}/{config.version}/era5_land"
 
 
-def anomaly_store_path(config):
-    return (f"{settings.ERA5_DATA_PREFIX}/{config.version}/"
-            f"era5_land_anomaly_ds.zarr")
+def repo_storage(config):
+    import icechunk
+    container, prefix = repo_prefix(config).split('/', 1)
+    return icechunk.azure_storage(account=config.azure_storage_account, container=container,
+                                  prefix=prefix, sas_token=config.sas_token)
+
+
+def repo_config():
+    """Storage retries for many concurrent GitHub Actions writers (as the production output repo)."""
+    import icechunk
+    cfg = icechunk.RepositoryConfig.default()
+    cfg.storage = icechunk.StorageSettings(retries=icechunk.StorageRetriesSettings(
+        max_tries=20, initial_backoff_ms=200, max_backoff_ms=60_000))
+    return cfg
+
+
+def _storage(config, local_store=None):
+    import icechunk
+    return icechunk.local_filesystem_storage(str(local_store)) if local_store else repo_storage(config)
+
+
+def repo_exists(config, local_store=None):
+    import icechunk
+    return icechunk.Repository.exists(_storage(config, local_store))
+
+
+def open_repo(config, local_store=None):
+    """Open the version's repository (``local_store``: a local icechunk repo path, for tests);
+    a clear FileNotFoundError when it has not been created yet."""
+    import icechunk
+    storage = _storage(config, local_store)
+    if not icechunk.Repository.exists(storage):
+        raise FileNotFoundError(
+            f"no ERA5-Land repository at {local_store or repo_prefix(config)}: the ERA5 Acquire "
+            "workflow creates it (or era5.initialize(config))")
+    return icechunk.Repository.open(storage, config=repo_config())
+
+
+def _provenance():
+    try:
+        from global_snowmelt_runoff_onset.provenance import collect_provenance
+        return collect_provenance()
+    except Exception:  # noqa: BLE001 - provenance must never fail a commit
+        import platform
+        return {"host": platform.node()}
+
+
+def build_template(config):
+    """The lazy, all-NaN template of the acquisition (and of the anomaly group) plus its
+    Zarr v3 encoding; written metadata-only by :func:`initialize`."""
+    import dask.array as da
+    import rioxarray  # noqa: F401
+    import zarr
+
+    years = [int(y) for y in config.water_years]
+    shape = (len(years), len(MONTH_LABELS), N_LAT, N_LON)
+    ds = xr.Dataset(
+        {v: (DIMS, da.full(shape, np.nan, dtype='float32', chunks=CHUNKS), dict(VARIABLE_ATTRS[v]))
+         for v in VARIABLES},
+        coords={'water_year': years, 'month': MONTH_LABELS, 'latitude': LATITUDE, 'longitude': LONGITUDE})
+    ds['latitude'].attrs = {'units': 'degrees_north', 'long_name': 'latitude of the cell centre (native ERA5-Land 0.1 degree grid, north-down)'}
+    ds['longitude'].attrs = {'units': 'degrees_east', 'long_name': 'longitude of the cell centre (native ERA5-Land 0.1 degree grid)'}
+    ds['month'].attrs = {'description': ('hemisphere-aware month of the water year: cells with latitude >= 0 carry '
+                                         'Dec(wy-1)..Aug(wy), cells south of the equator Jun(wy)..Feb(wy+1)')}
+    ds['water_year'].attrs = {'description': 'water year (NH Oct(wy-1)-Sep(wy); SH Apr(wy)-Mar(wy+1))'}
+    ds = ds.rio.set_spatial_dims(x_dim='longitude', y_dim='latitude').rio.write_crs('EPSG:4326')
+    ds.attrs.update({
+        'title': 'ERA5-Land monthly aggregates for the global snowmelt runoff onset analyses',
+        'source': f'Google Earth Engine {EE_COLLECTION} through xee on the native grid (no resampling)',
+        'crs': 'EPSG:4326', 'crs_transform': CRS_TRANSFORM, 'cadence': 'MONTHLY',
+        'data_citation': DATA_CITATION, 'dataset_version': config.version,
+    })
+    compressor = zarr.codecs.BloscCodec(cname='zstd', clevel=5)
+    encoding = {v: {'chunks': CHUNKS, 'compressors': [compressor], 'dtype': 'float32',
+                    '_FillValue': np.nan, 'fill_value': np.nan} for v in VARIABLES}
+    return ds, encoding
+
+
+def initialize(config, start_fresh=False, local_store=None, log=print):
+    """Return the version's repository, creating it with the empty template if it does not
+    exist. ``start_fresh=True`` DELETES an existing repository first (the ERA5 Acquire
+    workflow's off-by-default box; the only deletion in this module)."""
+    import icechunk
+    storage = _storage(config, local_store)
+    if icechunk.Repository.exists(storage):
+        if not start_fresh:
+            log(f"repository exists: {local_store or repo_prefix(config)}")
+            return icechunk.Repository.open(storage, config=repo_config())
+        if local_store:
+            import shutil
+            shutil.rmtree(local_store)
+        else:
+            fs = settings.fresh_blob_fs(config)
+            fs.rm(repo_prefix(config), recursive=True)
+            fs.invalidate_cache()
+        log(f"deleted {local_store or repo_prefix(config)} (start_fresh)")
+    years = [int(y) for y in config.water_years]
+    repo = icechunk.Repository.create(storage, config=repo_config())
+    repo.save_config()
+    template, encoding = build_template(config)
+    session = repo.writable_session(BRANCH)
+    template.to_zarr(session.store, mode='w', zarr_format=3, compute=False, write_empty_chunks=False,
+                     consolidated=False, encoding=encoding)
+    session.commit(f"initialize empty ERA5-Land store, WY{years[0]}-{years[-1]}",
+                   metadata={'schema': SCHEMA, 'kind': KIND_INIT, 'config_version': config.version,
+                             'water_years': years, 'variables': list(VARIABLES),
+                             'grid': {'n_lat': N_LAT, 'n_lon': N_LON, 'crs_transform': CRS_TRANSFORM},
+                             'provenance': _provenance()})
+    log(f"initialized {local_store or repo_prefix(config)}: empty template, WY{years[0]}-{years[-1]}")
+    return repo
+
+
+# ---------------------------------------------------------------------------
+# the ledger: a fold over the commit history
+
+def commit_records(repo, branch=BRANCH):
+    """Newest -> oldest list of the pipeline commits' metadata (init/maintenance commits
+    without the schema key are skipped), each with its ``ancestry_index`` (0 = newest)."""
+    records = []
+    for index, snap in enumerate(repo.ancestry(branch=branch)):
+        meta = snap.metadata or {}
+        if 'schema' not in meta or 'kind' not in meta:
+            continue
+        records.append({'ancestry_index': index, 'snapshot_id': snap.id,
+                        'written_at': str(snap.written_at), **meta})
+    return records
+
+
+def status(config, repo=None, local_store=None):
+    """What the repository holds for ``config.water_years``: ``years`` {wy: newest commit
+    record}, ``remaining`` (missing water years, in order), ``complete``, ``anomaly`` (its
+    commit record or None), ``anomaly_stale`` (a year committed after it, a year missing,
+    or a different base period) and the branch tip ``snapshot_id``."""
+    repo = repo or open_repo(config, local_store)
+    expected = [int(y) for y in config.water_years]
+    years, anomaly = {}, None
+    for r in commit_records(repo):                       # newest first: first seen wins
+        if r['kind'] == KIND_WATER_YEAR:
+            years.setdefault(int(r['water_year']), r)
+        elif r['kind'] == KIND_ANOMALY and anomaly is None:
+            anomaly = r
+    remaining = [y for y in expected if y not in years]
+    newest_year = min((r['ancestry_index'] for y, r in years.items() if y in expected), default=None)
+    stale = anomaly is not None and (
+        bool(remaining) or (newest_year is not None and newest_year < anomaly['ancestry_index'])
+        or [int(y) for y in anomaly.get('base_water_years', [])] != expected)
+    return {'years': years, 'remaining': remaining, 'complete': not remaining,
+            'anomaly': anomaly, 'anomaly_stale': stale, 'snapshot_id': repo.lookup_branch(BRANCH)}
+
+
+def commit_with_retry(repo, write_fn, message, metadata, branch=BRANCH, allow_empty=False,
+                      max_tries=COMMIT_MAX_TRIES, log=print):
+    """Write through a FRESH session and commit, rebasing over concurrent commits
+    (``ConflictDetector``: always clean here, the writers touch disjoint chunks) and
+    retrying the whole write on transient errors — the production fleet's routine."""
+    import icechunk
+    last = None
+    for attempt in range(max_tries):
+        try:
+            session = repo.writable_session(branch)
+            write_fn(session)
+            return session.commit(message, metadata=metadata,
+                                  rebase_with=icechunk.ConflictDetector(), allow_empty=allow_empty)
+        except (ValueError, KeyError, TypeError, AssertionError):
+            raise                                        # programming/schema errors
+        except Exception as e:  # noqa: BLE001 - conflict, expired session, storage blip
+            last = e
+            delay = min(60, 2 ** attempt) * random.uniform(0.5, 1.5)
+            log(f"commit attempt {attempt + 1}/{max_tries} failed ({type(e).__name__}: {e}); retry in {delay:.0f}s")
+            time.sleep(delay)
+    raise RuntimeError(f"commit failed after {max_tries} attempts") from last
+
+
+# ---------------------------------------------------------------------------
+# acquisition (Earth Engine, native grid)
+
+def month_windows(water_year):
+    """[(label, (NH year, month), (SH year, month))] for the 9 months of a water year."""
+    nh = [(water_year - 1, 12)] + [(water_year, m) for m in range(1, 9)]
+    sh = [(water_year, m) for m in range(6, 13)] + [(water_year + 1, 1), (water_year + 1, 2)]
+    return list(zip(MONTH_LABELS, nh, sh))
+
+
+def _open_window(variables, start, end):
+    """The collection's monthly images in [start, end) as a lazy xee Dataset (time, y, x)
+    on the native grid, time ascending. Earth Engine must be initialized."""
+    import ee
+    import xee  # noqa: F401  -- registers engine='ee'
+    ic = ee.ImageCollection(EE_COLLECTION).filterDate(start, end).select(list(variables))
+    return xr.open_dataset(ic, engine='ee', **NATIVE_GRID).sortby('time')
+
+
+def fetch_water_year(water_year, variables=VARIABLES, log=print):
+    """{variable: float32 (9, 1800, 3600)} for one water year from Earth Engine through xee
+    on the native grid: the NH window (Dec(wy-1)..Aug(wy)) fills the rows with latitude
+    >= 0, the SH window (Jun(wy)..Feb(wy+1)) the rows south of the equator; NaN where
+    ERA5-Land has no data. Raises if a window does not hold its 9 monthly images yet
+    (failure = nothing written). One variable x hemisphere (~230 MB) in memory at a time."""
+    wy = int(water_year)
+    windows = {'NH': (f"{wy - 1}-12-01", f"{wy}-09-01"), 'SH': (f"{wy}-06-01", f"{wy + 1}-03-01")}
+    expected_months = {'NH': [12, 1, 2, 3, 4, 5, 6, 7, 8], 'SH': [6, 7, 8, 9, 10, 11, 12, 1, 2]}
+    half = N_LAT // 2
+    out = {v: np.full((len(MONTH_LABELS), N_LAT, N_LON), np.nan, dtype='float32') for v in variables}
+    t0 = time.time()
+    for hemi, (start, end) in windows.items():
+        ds = _open_window(variables, start, end)
+        months = [int(m) for m in ds['time'].dt.month.values]
+        if months != expected_months[hemi]:
+            raise RuntimeError(f"{EE_COLLECTION}: the {hemi} window [{start}, {end}) of WY{wy} holds months "
+                               f"{months}, expected {expected_months[hemi]} (not all months published yet?)")
+        rows = slice(1, 1 + half) if hemi == 'NH' else slice(1 + half, 1 + N_LAT)   # skip the +90 row
+        for v in variables:
+            arr = ds[v].isel(y=rows, x=slice(0, N_LON)).values                    # (9, 900, 3600), float64
+            out[v][:, rows.start - 1:rows.stop - 1] = np.where(np.isfinite(arr), arr, np.nan).astype('float32')
+            del arr
+        log(f"  WY{wy} {hemi} window: {len(variables)} variables ({time.time() - t0:.0f}s)")
+    return out
+
+
+def _qa_stats(arrays):
+    """Small QA numbers for the commit metadata: finite fraction and land mean of the
+    first spring month of every variable."""
+    mi = MONTH_LABELS.index('spring_month_1')
+    stats = {}
+    for v, arr in arrays.items():
+        slab = arr[mi]
+        finite = np.isfinite(slab)
+        stats[v] = {'finite_fraction': round(float(finite.mean()), 4),
+                    'mean': round(float(slab[finite].mean()), 4) if finite.any() else None}
+    return stats
+
+
+def write_water_year(config, repo, water_year, arrays, duration_s=None, log=print):
+    """Write one water year's arrays into their slots and commit it as ONE ledger entry
+    (kind ``water_year``). Refuses arrays with no land data. Superseding an existing
+    year's commit is allowed (newest wins) but logged loudly."""
+    import zarr
+    water_year = int(water_year)
+    years = [int(y) for y in config.water_years]
+    j = years.index(water_year)
+    stats = _qa_stats(arrays)
+    frac = stats['temperature_2m']['finite_fraction'] if 'temperature_2m' in stats else max(s['finite_fraction'] for s in stats.values())
+    if frac < 0.1:
+        raise RuntimeError(f"WY{water_year}: only {frac:.3f} of the spring slab is finite — refusing to write")
+    if water_year in status(config, repo)['years']:
+        log(f"WARNING: WY{water_year} already has a commit; this write supersedes it")
+
+    def write_fn(session):
+        g = zarr.open_group(session.store, mode='r+')
+        assert int(g['water_year'][j]) == water_year, "water_year coordinate does not match the store"
+        for v, arr in arrays.items():
+            g[v][j] = arr
+
+    metadata = {'schema': SCHEMA, 'kind': KIND_WATER_YEAR, 'water_year': water_year,
+                'config_version': config.version, 'variables': sorted(arrays), 'stats': stats,
+                'duration_s': round(float(duration_s), 1) if duration_s is not None else None,
+                'provenance': _provenance()}
+    snap = commit_with_retry(repo, write_fn, f"WY{water_year}: ERA5-Land monthly, {len(arrays)} variables",
+                             metadata, log=log)
+    log(f"committed WY{water_year} -> {snap}")
+    return snap
+
+
+def acquire_water_year(config, water_year, repo=None, local_store=None, log=print):
+    """Fetch + write + commit one water year (the fleet job's whole work)."""
+    repo = repo or open_repo(config, local_store)
+    t0 = time.time()
+    arrays = fetch_water_year(water_year, log=log)
+    return write_water_year(config, repo, water_year, arrays, duration_s=time.time() - t0, log=log)
+
+
+# ---------------------------------------------------------------------------
+# opening + the anomaly group
+
+def open_era5_land(config, repo=None, local_store=None, chunks='auto', group=None):
+    """The acquisition (or, with ``group='anomaly'``, the anomaly) as a lazy Dataset on
+    ``(water_year, month, latitude, longitude)``, north-down native grid, CF coords."""
+    repo = repo or open_repo(config, local_store)
+    return xr.open_zarr(repo.readonly_session(BRANCH).store, group=group, zarr_format=3,
+                        consolidated=False, decode_coords='all', chunks=chunks)
+
+
+def build_anomaly(config, repo=None, local_store=None, force=False, log=print):
+    """(Re)build the ``anomaly`` group — every variable minus its per-pixel median over
+    all water years — once every water year is committed; skipped while years are
+    missing, and when an up-to-date anomaly commit exists (unless ``force``). One
+    (variable, month) slab at a time (~1 GB peak), one commit (kind ``anomaly``)."""
+    import zarr
+    repo = repo or open_repo(config, local_store)
+    st = status(config, repo)
+    if st['remaining']:
+        log(f"anomaly not built: water years still missing {st['remaining']}")
+        return None
+    if st['anomaly'] is not None and not st['anomaly_stale'] and not force:
+        log(f"anomaly up to date (commit {st['anomaly']['snapshot_id']})")
+        return st['anomaly']['snapshot_id']
+    years = [int(y) for y in config.water_years]
+    src = open_era5_land(config, repo, chunks=None)
+    template, encoding = build_template(config)
+    template.attrs.update({'title': 'ERA5-Land monthly anomalies vs the per-pixel median over the base water years',
+                           'anomaly_base_water_years': years})
+    for v in VARIABLES:
+        template[v].attrs['long_name'] += ', anomaly vs the median over all water years'
+    t0 = time.time()
+
+    def write_fn(session):
+        template.to_zarr(session.store, group=ANOMALY_GROUP, mode='w', zarr_format=3, compute=False,
+                         write_empty_chunks=False, consolidated=False, encoding=encoding)
+        g = zarr.open_group(session.store, mode='r+')[ANOMALY_GROUP]
+        for v in VARIABLES:
+            for mi in range(len(MONTH_LABELS)):
+                slab = src[v].isel(month=mi).values                    # (n_years, 1800, 3600)
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)      # all-NaN ocean columns
+                    median = np.nanmedian(slab, axis=0)
+                g[v][:, mi] = (slab - median).astype('float32')
+                del slab
+            log(f"  anomaly {v} done ({time.time() - t0:.0f}s)")
+
+    metadata = {'schema': SCHEMA, 'kind': KIND_ANOMALY, 'config_version': config.version,
+                'base_water_years': years, 'source_snapshot_id': st['snapshot_id'],
+                'variables': list(VARIABLES), 'provenance': _provenance()}
+    snap = commit_with_retry(repo, write_fn, f"anomaly vs the median over WY{years[0]}-{years[-1]}",
+                             metadata, max_tries=3, log=log)
+    log(f"committed anomaly -> {snap} ({time.time() - t0:.0f}s)")
+    return snap
+
+
+def open_anomaly(config, repo=None, local_store=None, chunks='auto'):
+    """The monthly anomaly group feeding the per-unit temperature sensitivity; refuses a
+    repository without an anomaly commit and warns when it is stale."""
+    repo = repo or open_repo(config, local_store)
+    st = status(config, repo)
+    if st['anomaly'] is None:
+        raise FileNotFoundError(
+            f"no anomaly commit in {repo_prefix(config)}: run the ERA5 Acquire workflow (it builds the "
+            "anomaly once every water year is committed) or era5.build_anomaly(config)")
+    if st['anomaly_stale']:
+        warnings.warn("the ERA5-Land anomaly group is stale (a water year was committed after it, or the "
+                      "base period differs from config.water_years): rebuild it", stacklevel=2)
+    return open_era5_land(config, repo, chunks=chunks, group=ANOMALY_GROUP)
 
 
 def correlations_store_path(config):
@@ -68,196 +460,6 @@ def correlations_store_path(config):
     from gsro_analysis import paths
     paths.SCRATCH.mkdir(parents=True, exist_ok=True)
     return paths.SCRATCH / f"{config.version}_runoff_onset_and_era5_eqearth_anomaly_correlations.zarr"
-
-
-# ---------------------------------------------------------------------------
-# acquisition (Earth Engine)
-
-def fetch_water_year(config, water_year, variables=VARIABLES):
-    """One water year of monthly ERA5-Land on the native 0.1° grid,
-    NH + SH merged with hemisphere-aware month windows. Earth Engine must
-    already be initialized (settings.initialize_earthengine())."""
-    hemis = [((-180, 0, 180, 90), f"{water_year - 1}-12-01", f"{water_year}-08-31"),
-             ((-180, -90, 180, 0), f"{water_year}-06-01", f"{water_year + 1}-02-28")]
-    parts = []
-    for bbox, start, end in hemis:
-        ds = easysnowdata.hydroclimatology.get_era5(
-            version="ERA5_LAND", bbox_input=bbox, cadence="MONTHLY",
-            start_date=start, end_date=end, initialize_ee=False,
-            variables=list(variables))
-        ds = (ds.expand_dims({'water_year': [water_year]})
-              .rename({'time': 'month'})
-              .assign_coords(month=MONTH_LABELS))
-        parts.append(ds)
-    return xr.merge(parts)
-
-
-def _marker_path(store_path):
-    """Sidecar done-marker for an ERA5 zarr: <prefix>/_complete/<name>.json —
-    the same verify-then-mark ledger the ancillary tiles use."""
-    prefix, name = store_path.rsplit('/', 1)
-    return f"{prefix}/_complete/{name}.json"
-
-
-def _sample_finite_fraction(ds, variables):
-    """Finite fraction of one spring slab of the first variable, over the
-    northern half (ERA5-Land is land-only: ~0.3-0.4 when data is present,
-    exactly 0 for a metadata-only / interrupted store)."""
-    import numpy as np
-    da = ds[variables[0]]
-    if 'water_year' in da.dims:
-        da = da.isel(water_year=0)
-    slab = da.sel(month='spring_month_1').isel(latitude=slice(0, 900)).values
-    return float(np.isfinite(slab).mean())
-
-
-def verify_and_mark(config, path, variables=VARIABLES, min_finite=0.1):
-    """Return True iff the store holds every variable AND a data sample reads
-    back finite; write the done-marker when it does (self-heals stores that
-    predate the ledger). Reads through a FRESH fs (see settings.fresh_blob_fs).
-    A 0-variable or NaN-only store — what an interrupted write leaves behind
-    (2026-08-25, twice) — is NOT complete."""
-    import json
-    fs = settings.fresh_blob_fs(config)
-    marker = _marker_path(path)
-    if fs.exists(marker):
-        return True
-    if not settings.zarr_store_exists(fs, path):
-        return False
-    try:
-        ds = xr.open_zarr(fs.get_mapper(path), chunks=None)
-        if not set(variables) <= set(ds.data_vars):
-            return False
-        frac = _sample_finite_fraction(ds, variables)
-    except Exception as e:  # noqa: BLE001 - reported, then treated as not verified
-        print(f"verify_and_mark({path}): read failed: {type(e).__name__}: {e}")
-        return False
-    if frac < min_finite:
-        return False
-    fs.pipe_file(marker, json.dumps({'store': path, 'variables': sorted(variables),
-                                     'sample_finite_fraction': round(frac, 3)}).encode())
-    return True
-
-
-def build_water_year_stores(config, water_years=None, variables=VARIABLES,
-                            overwrite=False):
-    """Write the per-water-year stores (skip-if-complete; a partial store
-    from an interrupted run is rebuilt). The ONE acquisition code path —
-    the old notebook had two divergent variants (9-month Azure vs 6-month
-    local); this is the 9-month one."""
-    settings.initialize_earthengine()
-    fs = config.azure_blob_fs
-    for wy in (water_years if water_years is not None else config.water_years):
-        wy = int(wy)
-        path = water_year_store_path(config, wy)
-        if not overwrite and verify_and_mark(config, path, variables):
-            print(f"skip WY{wy} (complete: {path})")
-            continue
-        # Fetch one variable at a time (bounds xee's transient peak — the
-        # whole-year request was OOM-killed on a 5 GB-free dev box), then
-        # write the year ONCE: appending new variables with mode='a' hits
-        # zarr v3's ContainsArrayError on the coordinate arrays (ERA5
-        # Acquire run 32882895446). Holding the merged year needs a few GB —
-        # this is a 16 GB-runner job (era5_acquire.yml), not a laptop one.
-        # consolidated=False for the same reason as
-        # datacube.save_ancillary_tile (stale-dircache consolidation).
-        if settings.zarr_store_exists(fs, path):  # partial, interrupted run
-            fs.rm(path, recursive=True)
-            fs.invalidate_cache()
-        parts = []
-        for var in variables:
-            print(f"fetching WY{wy} {var} ...")
-            parts.append(fetch_water_year(config, wy, [var]))
-        print(f"writing WY{wy} ...")
-        xr.merge(parts).to_zarr(fs.get_mapper(path), mode='w',
-                                consolidated=False)
-        del parts
-        # verification through a FRESH fs: the shared one can read back an
-        # empty group after the EE-heavy fetch (run 32885451802 failed here
-        # on a store that was in fact complete)
-        if not (verify_and_mark(config, path, variables)
-                or settings.verify_in_subprocess(config, 'era5', 'verify_and_mark',
-                                                 path, list(variables))):
-            raise RuntimeError(f"WY{wy}: post-write verification failed "
-                               f"({path})")
-        print(f"wrote {path}")
-
-
-# ---------------------------------------------------------------------------
-# opening + derived products
-
-def open_era5_stack(config, chunks='auto'):
-    """All water years of the version's ERA5-Land stores, concatenated on
-    water_year (native 0.1° grid)."""
-    fs = config.azure_blob_fs
-    prefix = water_year_store_path(config, 0).rsplit('/', 1)[0]
-    files = sorted(fs.glob(f"{prefix}/era5_water_year_*.zarr"))
-    if not files:
-        raise FileNotFoundError(f"no era5_water_year_*.zarr under {prefix}")
-    datasets = [xr.open_zarr(fs.get_mapper(f), chunks=chunks) for f in files]
-    return xr.concat(datasets, dim='water_year')
-
-
-def build_anomaly_store(config, base_water_years=None):
-    """The native-grid monthly anomaly store: stack minus the median over
-    ``base_water_years`` (default: every year in the stack); the base period
-    is recorded in attrs. Memory-bounded on purpose: the median is computed
-    one (variable, month) slab at a time (11 years x 1800 x 3600 -> a few
-    hundred MB) and held as a small in-memory dataset; the anomaly itself is
-    a lazy broadcast subtraction streamed to zarr. dask's own median needs
-    every year of a chunk at once and OOM-killed a 5 GB box (2026-08-25).
-    Still a ~4 GB job -> run it on a runner (ERA5 Acquire, build_anomaly).
-    """
-    import numpy as np
-
-    stack = open_era5_stack(config)
-    years = [int(y) for y in (base_water_years if base_water_years is not None
-                              else stack.water_year.values)]
-    base = stack.sel(water_year=years)
-    medians = {}
-    for var in stack.data_vars:
-        slabs = []
-        for month in stack.month.values:
-            slab = base[var].sel(month=month).load()          # 11 x 1800 x 3600
-            slabs.append(slab.median(dim='water_year'))
-            del slab
-        medians[var] = xr.concat(slabs, dim='month').assign_coords(
-            month=stack.month.values)
-        print(f"median done: {var}")
-    median_ds = xr.Dataset(medians)
-    anomaly = stack - median_ds                              # lazy broadcast
-    anomaly.attrs['anomaly_base_water_years'] = years
-    anomaly.attrs['dataset_version'] = config.version
-    for name in list(anomaly.variables):
-        anomaly[name].encoding = {}
-    anomaly = anomaly.chunk({'water_year': 1, 'month': 3,
-                             'latitude': 450, 'longitude': 900})
-    fs = settings.fresh_blob_fs(config)
-    path = anomaly_store_path(config)
-    if settings.zarr_store_exists(fs, path):
-        fs.rm(path, recursive=True)
-        fs.invalidate_cache()
-    anomaly.to_zarr(fs.get_mapper(path), mode='w', consolidated=False)
-    variables = list(stack.data_vars)
-    if not (verify_and_mark(config, path, variables)
-            or settings.verify_in_subprocess(config, 'era5', 'verify_and_mark',
-                                             path, variables)):
-        raise RuntimeError(f"anomaly store verification failed ({path})")
-    print(f"wrote {path}")
-    return path
-
-
-def open_anomaly(config, chunks='auto'):
-    """The monthly anomaly store feeding the per-range temperature
-    sensitivity; refuses a store that has not passed verify_and_mark."""
-    path = anomaly_store_path(config)
-    if not verify_and_mark(config, path):
-        raise FileNotFoundError(
-            f"{path} is missing or unverified (no _complete marker / no "
-            "finite data). Run the ERA5 Acquire workflow with build_anomaly, "
-            "or era5.build_anomaly_store(config) on a >= 8 GB machine.")
-    return xr.open_zarr(config.azure_blob_fs.get_mapper(path),
-                        decode_coords='all', chunks=chunks)
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +639,87 @@ def to_equal_earth(ds):
     return ds.odc.reproject("EPSG:8857")
 
 
+def pixelwise_correlations(config, variables=None, level=7, out_path=None,
+                           progress=print):
+    """Per-pixel Pearson correlation across water years between the
+    runoff-onset anomaly and each ERA5-Land variable's monthly anomaly, on
+    the Equal-Earth grid of :func:`combined_anomaly_eqearth` and with its
+    exact semantics (ERA5 reprojected to EPSG:8857 nearest-neighbour and
+    masked per year to onset-valid pixels; every anomaly vs the median over
+    all water years; the onset anomaly masked to valid-median pixels; the
+    pyramid's yearly ``temporal_resolution`` correlated too and broadcast
+    over month) — but streamed one (variable, water year) slab at a time
+    (~3 GB peak, no cluster) instead of one dask graph over the whole ~20 GB
+    stack, which never converged on a 16 GB box (2026-09-03).
+
+    Writes a zarr with dims ``(month, y, x)`` at ``out_path`` (default
+    :func:`correlations_store_path`, local under scratch/) and returns the
+    path. The exploratory ``analyses/climate/pixelwise_climate_correlations``
+    notebook is its only caller."""
+    import odc.geo.xr  # noqa: F401  -- registers the .odc accessor
+    import rioxarray  # noqa: F401
+    from gsro_analysis.datacube import open_coarse_onset
+
+    stack = open_era5_land(config)
+    variables = list(variables or [v for v in VARIABLES if v in stack])
+    years = [int(y) for y in stack.water_year.values]
+    months = list(stack.month.values)
+
+    # the target grid: what to_equal_earth gives the whole stack (one slab is enough to fix it)
+    template = to_equal_earth(stack[variables[0]].isel(water_year=0, month=0)
+                              .to_dataset()).compute()
+    geobox = template.odc.geobox
+    ny, nx = geobox.shape
+
+    # the coarse onset (public pyramid, ~10 km) on that grid, years aligned with the stack
+    coarse = open_coarse_onset(config, level)[['runoff_onset', 'runoff_onset_median',
+                                                'temporal_resolution']]
+    onset = coarse.rio.reproject_match(template).reindex(water_year=years)
+    valid = onset['runoff_onset'].notnull()                          # (water_year, y, x)
+    onset_anom = (onset['runoff_onset'] - onset['runoff_onset'].median('water_year')
+                  ).where(onset['runoff_onset_median'] > 0)
+    coords = {'water_year': years, 'y': template.y, 'x': template.x}
+
+    def corr_with_onset(da):
+        anom = da - da.median('water_year')
+        return xr.corr(onset_anom, anom, dim='water_year').values.astype('float32')
+
+    out = {}
+    for v in variables:
+        cube = np.empty((len(years), len(months), ny, nx), dtype='float32')
+        for j, y in enumerate(years):
+            slab = stack[v].sel(water_year=y).load()                 # (month, lat, lon), ~230 MB
+            cube[j] = slab.odc.reproject(geobox).values
+            del slab
+        r = np.full((len(months), ny, nx), np.nan, dtype='float32')
+        for mi in range(len(months)):
+            da = xr.DataArray(cube[:, mi], dims=('water_year', 'y', 'x'), coords=coords).where(valid)
+            r[mi] = corr_with_onset(da)
+            del da
+        out[v] = (('month', 'y', 'x'), r)
+        del cube
+        progress(f"{v} done")
+    tr = corr_with_onset(onset['temporal_resolution'])
+    out['temporal_resolution'] = (('month', 'y', 'x'), np.broadcast_to(tr, (len(months), ny, nx)).copy())
+
+    ds = xr.Dataset(out, coords={'month': months, 'y': template.y, 'x': template.x,
+                                 'spatial_ref': template['spatial_ref']})
+    ds.attrs.update({
+        'method': ('Pearson r across water years of the runoff-onset anomaly (public pyramid level '
+                   f'{level}, nearest) vs each ERA5-Land monthly anomaly, both on the Equal Earth grid of '
+                   'to_equal_earth; ERA5 masked per year to onset-valid pixels; anomalies vs the median '
+                   'over all water years; onset anomaly masked to valid-median pixels'),
+        'water_years': years, 'dataset_version': config.version,
+    })
+    for name in list(ds.variables):
+        ds[name].encoding = {}
+    ds = ds.chunk({'month': -1, 'y': 512, 'x': 512})
+    path = out_path or correlations_store_path(config)
+    ds.to_zarr(path, mode='w')
+    progress(f"wrote {path}")
+    return path
+
+
 def combined_anomaly_eqearth(config, coarse_onset_ds=None):
     """The on-the-fly replacement for the retired
     ``combined_runoff_onset_and_era5_eqearth_anomaly_ds`` store: raw ERA5
@@ -453,7 +736,7 @@ def combined_anomaly_eqearth(config, coarse_onset_ds=None):
         from gsro_analysis.datacube import open_coarse_onset
         coarse_onset_ds = open_coarse_onset(config, level=7)
 
-    era5_proj = to_equal_earth(open_era5_stack(config))
+    era5_proj = to_equal_earth(open_era5_land(config))
     onset_proj = coarse_onset_ds.rio.reproject_match(era5_proj)
     era5_masked = era5_proj.where(onset_proj['runoff_onset'].notnull())
     combined = xr.merge([onset_proj, era5_masked], compat='override')

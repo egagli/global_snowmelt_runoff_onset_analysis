@@ -1,33 +1,37 @@
 name: ERA5 Acquire
 
-# Fetch ERA5-Land water-year stores (pipeline/scripts/fetch_era5.py) on a
-# 16 GB runner — the fetch OOMs on the dev box. One matrix job per water
-# year; each is skip-if-exists, so redispatching is free. Runs on the
-# GitHub-hosted runners of this public repository (the 16 GB machines this
-# job needs) with the same three repository secrets as the fleet.
+# The ERA5-Land store of one dataset version (pipeline/scripts/era5_land.py; layout and
+# ledger in gsro_analysis/era5.py): ONE icechunk repository per version, initialized as an
+# empty template if it does not exist yet, then filled one water year per job. The plan
+# job folds the repository's commit history and dispatches only the water years that have
+# no commit; the anomaly job runs afterwards and builds the anomaly group once every water
+# year is committed (a no-op otherwise, or when it is already up to date). Re-dispatching is
+# free: a failed year job commits nothing and is simply re-listed. Acquisitions come from
+# Earth Engine (ee.data.computePixels on the native grid) and are never copied from another
+# version. `start_fresh` (off by default) DELETES the version's repository and recreates the
+# template — the only deletion this workflow can make.
+#
+# Runs on the GitHub-hosted runners of this public repository with the three repository
+# secrets (AZURE_STORAGE_SAS_TOKEN, AZURE_STORAGE_ACCOUNT, EE_SERVICE_ACCOUNT_KEY); the
+# production repo is checked out at a pinned commit.
 
 on:
   workflow_dispatch:
     inputs:
-      water_years:
-        description: 'Comma-separated water years to fetch (each becomes one job)'
-        required: false
-        default: '2025'
-        type: string
-      copy_from_version:
-        description: 'First server-side copy this version''s existing year stores (e.g. v9); blank = no copy'
-        required: false
-        default: ''
-        type: string
       config_file:
-        description: 'Config file (resolved inside the production clone)'
+        description: 'Config file (resolved inside the production clone); its water years are acquired'
         required: false
         default: 'config/global_config_v10.txt'
         type: string
-      build_anomaly:
-        description: 'After the year stores, build the anomaly store (all years as base period; ~4 GB)'
+      start_fresh:
+        description: 'DELETE this version''s ERA5-Land repository and start from an empty template'
         required: false
-        default: true
+        default: false
+        type: boolean
+      rebuild_anomaly:
+        description: 'Rebuild the anomaly group even if it is up to date'
+        required: false
+        default: false
         type: boolean
 permissions:
   contents: read
@@ -38,72 +42,68 @@ concurrency:
 
 env:
   PYTHONUNBUFFERED: "1"   # keep stdout/stderr interleaved in job logs
-  # the production package (Config, store access, plot_utils) is pinned to a commit, never a
+  # the production package (Config, store access, provenance) is pinned to a commit, never a
   # branch: that repository is read-only from here. Mirrored in the pixi.toml comment.
   PRODUCTION_REPO_SHA: 18992fa7018d517a23f5507b28ec80edba2d0482
   AZURE_STORAGE_SAS_TOKEN: ${{ secrets.AZURE_STORAGE_SAS_TOKEN }}
   AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
 
 jobs:
-  years:
+  plan:
+    # initialize the repository if missing (or start fresh), fold the ledger, list the remaining years
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
-      matrix: ${{ steps.split.outputs.matrix }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+      anomaly_needed: ${{ steps.plan.outputs.anomaly_needed }}
     steps:
-      - id: split
+      - uses: actions/checkout@v4
+        with:
+          path: global_snowmelt_runoff_onset_analysis
+
+      - name: Checkout production repo (side-by-side, required by the pixi env and Config; pinned commit)
+        uses: actions/checkout@v4
+        with:
+          repository: egagli/global_snowmelt_runoff_onset
+          ref: ${{ env.PRODUCTION_REPO_SHA }}
+          path: global_snowmelt_runoff_onset
+
+      - uses: prefix-dev/setup-pixi@v0.8.0
+        with:
+          pixi-version: v0.65.0
+          manifest-path: global_snowmelt_runoff_onset_analysis/pixi.toml
+          environments: ci
+          cache: true
+
+      - name: Initialize the store if it does not exist (start_fresh deletes and recreates it)
+        working-directory: global_snowmelt_runoff_onset_analysis
         run: |
-          YEARS=$(echo "${{ inputs.water_years }}" | python3 -c "import sys,json; print(json.dumps([y.strip() for y in sys.stdin.read().split(',') if y.strip()]))")
-          echo "matrix={\"year\":$YEARS}" >> "$GITHUB_OUTPUT"
+          pixi run -e ci python pipeline/scripts/era5_land.py init \
+            --config "${{ inputs.config_file }}" ${{ inputs.start_fresh && '--start-fresh' || '' }}
+
+      - name: Derive the remaining water years from the commit ledger
+        id: plan
+        working-directory: global_snowmelt_runoff_onset_analysis
+        run: |
+          pixi run -e ci python pipeline/scripts/era5_land.py plan \
+            --config "${{ inputs.config_file }}" \
+            --manifest-out "$GITHUB_WORKSPACE/era5_plan.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: era5-plan
+          path: era5_plan.json
 
   fetch:
-    needs: years
-    runs-on: ubuntu-latest
-    timeout-minutes: 350
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.years.outputs.matrix) }}
-    env:
-      MALLOC_ARENA_MAX: "2"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: global_snowmelt_runoff_onset_analysis
-
-      - name: Checkout production repo (side-by-side, required by the pixi env and Config; pinned commit)
-        uses: actions/checkout@v4
-        with:
-          repository: egagli/global_snowmelt_runoff_onset
-          ref: ${{ env.PRODUCTION_REPO_SHA }}
-          path: global_snowmelt_runoff_onset
-
-      - uses: prefix-dev/setup-pixi@v0.8.0
-        with:
-          pixi-version: v0.65.0
-          manifest-path: global_snowmelt_runoff_onset_analysis/pixi.toml
-          environments: ci
-          cache: true
-
-      - name: Write Earth Engine service key
-        run: |
-          printf '%s' "$EE_KEY" > global_snowmelt_runoff_onset/config/ee_key.json
-        env:
-          EE_KEY: ${{ secrets.EE_SERVICE_ACCOUNT_KEY }}
-
-      - name: Fetch WY${{ matrix.year }}
-        working-directory: global_snowmelt_runoff_onset_analysis
-        run: |
-          pixi run -e ci python pipeline/scripts/fetch_era5.py \
-            --config "${{ inputs.config_file }}" \
-            --water-years "${{ matrix.year }}" \
-            --copy-from-version "${{ inputs.copy_from_version }}"
-
-  anomaly:
-    # all year stores verified complete (skip-if-marked) -> build the anomaly
-    # store on a 16 GB runner; dask's median OOMs the dev box
-    needs: fetch
-    if: ${{ inputs.build_anomaly }}
+    # one job per remaining water year: fetch from Earth Engine, write its chunks, one commit
+    needs: plan
+    if: fromJson(needs.plan.outputs.count) > 0
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false        # one bad year must not stop the others
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     env:
       MALLOC_ARENA_MAX: "2"
     steps:
@@ -131,8 +131,42 @@ jobs:
         env:
           EE_KEY: ${{ secrets.EE_SERVICE_ACCOUNT_KEY }}
 
-      - name: Build anomaly store
+      - name: Fetch and commit WY${{ matrix.year }}
         working-directory: global_snowmelt_runoff_onset_analysis
         run: |
-          pixi run -e ci python pipeline/scripts/fetch_era5.py \
-            --config "${{ inputs.config_file }}" --build-anomaly
+          pixi run -e ci python pipeline/scripts/era5_land.py fetch \
+            --config "${{ inputs.config_file }}" --water-year "${{ matrix.year }}"
+
+  anomaly:
+    # after the year jobs (whether any ran or not): build the anomaly group once every water
+    # year is committed; the script itself skips while years are missing or when it is current
+    needs: [plan, fetch]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      MALLOC_ARENA_MAX: "2"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: global_snowmelt_runoff_onset_analysis
+
+      - name: Checkout production repo (side-by-side, required by the pixi env and Config; pinned commit)
+        uses: actions/checkout@v4
+        with:
+          repository: egagli/global_snowmelt_runoff_onset
+          ref: ${{ env.PRODUCTION_REPO_SHA }}
+          path: global_snowmelt_runoff_onset
+
+      - uses: prefix-dev/setup-pixi@v0.8.0
+        with:
+          pixi-version: v0.65.0
+          manifest-path: global_snowmelt_runoff_onset_analysis/pixi.toml
+          environments: ci
+          cache: true
+
+      - name: Build the anomaly group (skips while water years are missing or when up to date)
+        working-directory: global_snowmelt_runoff_onset_analysis
+        run: |
+          pixi run -e ci python pipeline/scripts/era5_land.py anomaly \
+            --config "${{ inputs.config_file }}" ${{ inputs.rebuild_anomaly && '--force' || '' }}

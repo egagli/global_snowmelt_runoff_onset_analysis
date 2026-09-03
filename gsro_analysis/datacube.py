@@ -80,11 +80,43 @@ def add_topography(tile,ds):
 
     return ds
 
-def add_chili(tile,ds):
+CHILI_ASSET = "CSP/ERGo/1_0/Global/ALOS_CHILI"
 
-    chili_da = easysnowdata.topography.get_chili(tile.bbox_gdf, initialize_ee=False)
-    ds['chili'] = chili_da.rio.reproject_match(ds['dem'],resampling=rasterio.enums.Resampling.bilinear)
 
+def fetch_chili(bbox_gdf):
+    """CHILI on its NATIVE ~90 m lattice cropped to the bbox, as a 0-1 index.
+
+    xee >= 0.1 with an explicit pixel grid: ``easysnowdata.utils.get_ee_grid_params``
+    snaps the bbox to the asset's own lattice, so the pixels are the asset's values,
+    not a resample. Normalized by the asset's fixed 0-255 range — NOT the per-bbox
+    min-max of ``easysnowdata.get_chili``, which made tiles incomparable (tile
+    016_152's window spans 0-242, inflating its values by 5 %). Earth Engine must be
+    initialized (settings.initialize_earthengine()).
+
+    History (2026-09-03): easysnowdata <= 0.0.24 anchored the xee grid on the bbox
+    corner, 0.46/0.51 px off the lattice, so every earlier CHILI layer was a
+    nearest-neighbour resample of a half-pixel-shifted grid (max |diff| 0.42 vs the
+    native values on 016_152). The v10 fleet builds from the native lattice."""
+    import ee
+    import xee  # noqa: F401  -- registers engine='ee'
+    from easysnowdata.utils import get_ee_grid_params
+
+    image = ee.Image(CHILI_ASSET)
+    grid = get_ee_grid_params(image, bbox_gdf)
+    da = xr.open_dataset(ee.ImageCollection(image), engine='ee', **grid)['constant'].isel(time=0, drop=True)
+    da = (da.astype(np.float32) / np.float32(255.0))                        # dims (y, x), rioxarray-native names
+    da = da.rio.write_crs(grid['crs']).rio.write_nodata(np.nan)
+    da.attrs = {'long_name': 'Continuous Heat-Insolation Load Index, asset value / 255',
+                'source': CHILI_ASSET, 'grid': 'native lattice',
+                'data_citation': ('Theobald, D.M., Harrison-Atlas, D., Monahan, W.B., Albano, C.M. (2015). '
+                                  'Ecologically-Relevant Maps of Landforms and Physiographic Diversity for '
+                                  'Climate Adaptation Planning. PLoS ONE 10(12): e0143619.')}
+    return da
+
+
+def add_chili(tile, ds):
+    chili_da = fetch_chili(tile.bbox_gdf)
+    ds['chili'] = chili_da.rio.reproject_match(ds['dem'], resampling=rasterio.enums.Resampling.bilinear)
     return ds
 
 def add_snow_class(tile,ds,mask_nodata=True):
@@ -291,6 +323,11 @@ def build_ancillary_tile(config, row, col, mask_nodata=True):
     ds = add_mountain_range_and_basin_and_continent(tile, ds)
 
     ds = ds.drop_vars('_template')
+    # keep only serializable attrs: easysnowdata >= 0.0.25 attaches dict-valued attrs (snow-class
+    # names/colours) that zarr would stringify and netCDF refuses
+    for name in ds.data_vars:
+        ds[name].attrs = {k: v for k, v in ds[name].attrs.items()
+                          if isinstance(v, (str, bytes, int, float, list, tuple, np.ndarray, np.number))}
     continents_gdf = gpd.read_file(settings.cached_source(settings.CONTINENTS_URL))
     enum = list(np.unique(list(continents_gdf.CONTINENT)))
     ds.attrs.update({
@@ -704,8 +741,8 @@ VERSION_PRODUCTS = {
     'pixel_tables':  lambda c: f"{settings.ANALYSIS_PARQUET_PREFIX}/{c.version}",   # fleet, opt-in per-pixel parquets
     'ancillary_grid': lambda c: f"{settings.ANCILLARY_PREFIX}/{c.version}_grid",    # fleet stage 0 (per GRID; rebuilding = Earth Engine again)
     'aggregated_mirror': lambda c: f"{settings.AGGREGATED_PREFIX}/{c.version}",    # reduce --mirror copies of the cubes
-    'era5_stores':   lambda c: f"{settings.ERA5_DATA_PREFIX}/{c.version}",          # ERA5 Acquire workflow: 11 year stores + anomaly (~9 GB,
-                                                                                    # ~12 runner-hours to refetch) — NOT in the default reset
+    'era5_land':     lambda c: f"{settings.ERA5_LAND_PREFIX}/{c.version}",          # the ERA5-Land icechunk repo (acquisition + anomaly group;
+                                                                                    # ERA5 Acquire rebuilds it, ~1 h) — NOT in the default reset
 }
 FLEET_PRODUCTS = VERSION_PRODUCTS  # historical alias
 
@@ -726,8 +763,8 @@ def reset_version(config, what=('partials', 'pixel_tables', 'ancillary_grid'),
     """Delete the chosen fleet products of this version on Azure so the next
     dispatch rebuilds every tile from scratch (the dispatcher lists remaining
     work from these prefixes). Prints the plan and does NOTHING unless
-    ``confirm=True``. ``'era5_stores'`` must be asked for explicitly (then the
-    ERA5 Acquire workflow refetches them). Never deletes the icechunk dataset,
+    ``confirm=True``. ``'era5_land'`` must be asked for explicitly (then the
+    ERA5 Acquire workflow re-acquires every water year; its start_fresh box does the same). Never deletes the icechunk dataset,
     the pyramid, or anything outside VERSION_PRODUCTS."""
     unknown = set(what) - set(VERSION_PRODUCTS)
     if unknown:

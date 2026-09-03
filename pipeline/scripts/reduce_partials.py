@@ -8,13 +8,13 @@ aggregate cubes the analyses read.
     (aggregate.GROUPS). One file per filter tag (aggregate.FILTERS: fcf_lte_50
     and full_dataset), compressed netCDF.
 
-Inputs: snowmelt/analysis/partials/<version>/tile_*.parquet (downloaded once
+Inputs: snowmelt/snowmelt_runoff_onset_analysis/partials/<version>/tile_*.parquet (downloaded once
 into aggregated_results/<version>/partials/ — re-runs only fetch new tiles),
 GMBA + USGS continents (cached vector sources), the static GTOPO30 histogram
 (data/gtopo30_lat_elev_histogram.nc, --build-gtopo30 regenerates it via
 Earth Engine) and, if present, the ERA5 zonal files written by era5_zonal.py
 (merged into the mountain-range cube). --mirror uploads the finished cubes to
-snowmelt/analysis/aggregated/<version>/ so they exist somewhere other than
+snowmelt/snowmelt_runoff_onset_analysis/aggregated/<version>/ so they exist somewhere other than
 this machine. Needs an Azure SAS token.
 """
 
@@ -43,7 +43,7 @@ def parse_args():
     p.add_argument('--build-gtopo30', action='store_true',
                    help='(re)build data/gtopo30_lat_elev_histogram.nc via Earth Engine')
     p.add_argument('--mirror', action='store_true',
-                   help='upload the cubes to snowmelt/analysis/aggregated/<version>/')
+                   help='upload the cubes to snowmelt/snowmelt_runoff_onset_analysis/aggregated/<version>/')
     p.add_argument('--no-download', action='store_true',
                    help='use the local partials cache as is (no Azure listing)')
     return p.parse_args()
