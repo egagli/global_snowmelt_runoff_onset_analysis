@@ -5,7 +5,8 @@
 /scratch/
 /data/*
 !/data/README.md
-!/data/gtopo30_lat_elev_histogram.nc   # 40 KB, required by the reduce (rebuild: reduce_partials.py --build-gtopo30)
+# the 40 KB GTOPO30 land histogram is tracked: the reduce needs it and only Earth Engine can rebuild it
+!/data/gtopo30_lat_elev_histogram.nc
 
 # figures: one tracked set per dataset version (analyses/<unit>/figures/<version>/), except the
 # machine-generated sweeps (one file per mountain range / region-year), which are regenerable —
