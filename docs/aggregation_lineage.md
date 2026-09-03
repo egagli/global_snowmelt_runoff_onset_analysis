@@ -251,6 +251,31 @@ If the campaign has already run when this is decided, the fallback is the "stage
 fleet pass described above; the ancillary layers other than the ids are untouched and no Earth
 Engine work recurs.
 
+## Design note: the ancillary as one icechunk repository on the dataset grid (raised 2026-09-03; not pursued for now)
+
+Considered and deferred: replacing the per-tile UTM ancillary zarrs with ONE icechunk repository on the
+dataset's own geographic grid (EPSG:4326, 0.00072°, 204,800 × 499,998 pixels, one shard per 2048 × 2048 tile
+per layer), the layout the ERA5-Land store and the production dataset store already use.
+
+What it would buy: the runoff-onset values would never be resampled (today `tabulate_tile` reprojects the
+0.00072° store window bilinearly onto the 80 m UTM grid; on the dataset grid the tabulate is an exact
+pixel join by index), the resampling burden would move to the static ancillary layers, the grid would be
+fixed by the config instead of rasterio's default-transform heuristics, the commit history would replace
+the marker-blob ledger, and the ancillary would become one global product any region or the pyramid could
+read. What it would cost: geographic pixels shrink with latitude, so the partial sums would need an area
+weight (cos φ) alongside the pixel count (an improvement even over UTM, whose pixels are only approximately
+equal); slope and aspect still need a metric grid, so stage 0 would build them per tile in UTM and bring
+them back by bilinear and sin/cos resampling; far-north tiles carry about twice the pixels (2048² instead
+of, e.g., 2057 × 1060 for tile 016_152), so the tabulate would peak nearer 6–8 GB and the ancillary would
+grow from ~35 GB to ~65–85 GB; and stages 0–1 would be rewritten and re-validated (about a day).
+
+Decision (2026-09-03): keep the per-tile UTM ancillary for the v10 campaign; revisit if the onset
+resampling or the area weighting ever matters for an analysis. A related provenance fact from the same
+day: two builds of tile 016_152 with different environments (the 2026-08-24 lock with GDAL 3.12.3 /
+rasterio 1.5.0 / odc-stac 0.5.2 / PROJ 9.7.1 versus the current 3.13.2 / 1.5.1 / 0.5.3 / 9.8.1) differ in
+11 % of DEM cells by more than 1 m with zero mean bias, while two builds in one environment are identical
+— the lock file is part of the ancillary's provenance, and the whole grid is built with one lock.
+
 ## Design note: CHILI scope (2026-09-02; decided the same day: A, keep everywhere; unchanged in the code)
 
 Question raised by Eric: keep CHILI at all? It matters for continents; do the other unit types

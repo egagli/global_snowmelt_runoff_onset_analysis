@@ -83,6 +83,11 @@ the production repo's icechunk fleet pattern adapted to blob-existence ledgers:
   coverage (`datacube.LAYER_LAT_COVERAGE`) or on the source's own no-data signal; any other
   failure raises (failure = no output, never wrong output).
 - **memory**: the tabulate step peaks at ~3–4 GB per tile; fine on the 16 GB public runners.
+- **grid**: the ancillary lives on a per-tile UTM 80 m grid (the store window is reprojected onto it at
+  tabulate time). One icechunk repository on the dataset's geographic grid was considered on 2026-09-03
+  and deferred — see the design note in [docs/aggregation_lineage.md](../docs/aggregation_lineage.md).
+  Rebuilding with a different `pixi.lock` changes the terrain layers at the metre level (GDAL/PROJ warp
+  numerics), so one grid generation is built with one lock.
 
 ## The ERA5-Land store
 
