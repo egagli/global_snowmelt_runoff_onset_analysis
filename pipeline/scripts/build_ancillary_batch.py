@@ -58,10 +58,9 @@ def main():
 
     print(f"Earth Engine initialized as {settings.initialize_earthengine(key_file=args.ee_key)}", flush=True)
     # warm the vector-source cache ONCE before looping: per-tile reads must never hit the network
-    settings.cached_source(settings.GMBA_URL)
-    settings.cached_source(settings.CONTINENTS_URL)
-    settings.cached_source(settings.BASIN_ATLAS_URL, filename='BasinATLAS_Data_v10.gdb.zip',
-                           expected_md5=settings.BASIN_ATLAS_MD5)
+    settings.gmba_zip()
+    settings.continents_zip()
+    settings.basin_atlas_gdb()
 
     repo = datacube.open_ancillary_repo(config, args.local_store)
     done = datacube.completed_ancillary_tiles(config, repo)

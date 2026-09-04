@@ -75,8 +75,11 @@ jobs:
       - name: Restore vector-source cache (continents, for the template attrs)
         uses: actions/cache@v4
         with:
-          path: global_snowmelt_runoff_onset_analysis/data/geometries/sources
-          key: vector-sources-v1
+          path: |
+            global_snowmelt_runoff_onset_analysis/analyses/mountain_ranges/data/geometries/GMBA_Inventory_v2.0_standard_300.zip
+            global_snowmelt_runoff_onset_analysis/analyses/continents/data/geometries/continents.zip
+            global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/BasinATLAS_Data_v10.gdb.zip
+          key: vector-sources-v2
 
       - name: Create the ancillary repository if missing, fold its ledger, list the tiles without a commit
         id: plan
@@ -125,8 +128,11 @@ jobs:
       - name: Restore vector-source cache (GMBA / continents / BasinATLAS)
         uses: actions/cache@v4
         with:
-          path: global_snowmelt_runoff_onset_analysis/data/geometries/sources
-          key: vector-sources-v1
+          path: |
+            global_snowmelt_runoff_onset_analysis/analyses/mountain_ranges/data/geometries/GMBA_Inventory_v2.0_standard_300.zip
+            global_snowmelt_runoff_onset_analysis/analyses/continents/data/geometries/continents.zip
+            global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/BasinATLAS_Data_v10.gdb.zip
+          key: vector-sources-v2
 
       - name: Write Earth Engine service key
         run: |

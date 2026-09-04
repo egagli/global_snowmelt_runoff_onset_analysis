@@ -1,12 +1,15 @@
-# large data directories (see data/README.md for provenance)
-# data/ holds ALL inputs (geometries, era5, hillshade, snotel archive);
-# aggregated_results/<version>/ holds pipeline outputs — both regenerable.
-/aggregated_results/
-/scratch/
+# inputs and caches — data/README.md says where each comes from and how it is rebuilt
 /data/*
 !/data/README.md
-# the 40 KB GTOPO30 land histogram is tracked: the reduce needs it and only Earth Engine can rebuild it
-!/data/gtopo30_lat_elev_histogram.nc
+/partials/
+# the cubes and zonal means, regenerable by analyses/<unit>/0_aggregate_by_<unit>.ipynb
+analyses/*/data/aggregation/
+# downloaded polygons (GMBA, BasinATLAS, USGS continents); the small tracked tables are listed below
+analyses/*/data/geometries/*
+!analyses/river_basins/data/geometries/hydrobasins_level6_population.csv
+# self-downloaded station archive + climatology cache of the Evan & Eisenman comparison
+analyses/climate/temperature_sensitivity_comparison/data/
+/scratch/
 
 # figures: one tracked set per dataset version (analyses/<unit>/figures/<version>/), except the
 # machine-generated sweeps (one file per mountain range / region-year), which are regenerable —
@@ -14,10 +17,6 @@
 analyses/mountain_ranges/figures/**/triplets/
 analyses/mountain_ranges/figures/**/anomaly_scatterplots/
 analyses/mountain_ranges/figures/**/regional_panels/*.png
-
-# staging area of material that leaves this repository at the public export (see private/README.md)
-private/**/*.png
-private/**/*.pdf
 
 # secrets / tokens
 config/sas_token.txt
@@ -46,7 +45,3 @@ logs/
 
 # Claude Code agent worktrees / scratch state
 .claude/
-
-# CI fixture outputs (the reduce writes next to the fixture partials)
-tests/fixtures/aggregated_results/*/*/
-!tests/fixtures/aggregated_results/*/partials/

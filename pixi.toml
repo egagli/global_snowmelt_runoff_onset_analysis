@@ -90,16 +90,27 @@ nbstripout = ">=0.9.1,<0.10"
 global-snowmelt-runoff-onset = { path = "../global_snowmelt_runoff_onset", editable = true }
 gsro-analysis = { path = ".", editable = true }
 
+# `notebooks` is what the CI needs to execute the three aggregation notebooks headlessly
+# (nbconvert + a kernel + matplotlib for their preview plots); the fleet jobs share the env.
+[feature.notebooks.dependencies]
+nbconvert = ">=7.17.1,<8"
+ipykernel = ">=7.3.0,<8"
+matplotlib = ">=3.11.1,<4"
+
 [environments]
-default = { features = ["pipeline", "analysis", "dev"] }
-# slim env for the GitHub Actions jobs (fleet, ERA5 acquire, CI reduce): no plotting, no jupyter
-ci = { features = ["pipeline"] }
+default = { features = ["pipeline", "analysis", "dev", "notebooks"] }
+# slim env for the GitHub Actions jobs (fleet, ERA5 acquire, CI aggregation): no cartopy, no jupyterlab
+ci = { features = ["pipeline", "notebooks"] }
 
 [tasks]
 lab = "jupyter lab"
 setup-kernel = "python -m ipykernel install --user --name gsro-analysis --display-name 'gsro-analysis (pixi)'"
-# the local stages, in order (each idempotent). Extra arguments follow the task name directly, e.g.
-# `pixi run reduce --mirror` (pixi 0.65 passes a `--` separator through to the script, which argparse rejects)
-era5-zonal = "python pipeline/scripts/era5_zonal.py"
-reduce = "python pipeline/scripts/reduce_partials.py"
-metrics = "python pipeline/scripts/range_metrics.py"
+# the git filter that strips notebook outputs AND the kernelspec (so a kernel rename never dirties a notebook)
+setup-nbstripout = "nbstripout --install --attributes .gitattributes && git config filter.nbstripout.extrakeys 'metadata.kernelspec metadata.language_info'"
+# the aggregation step, headless: the three notebooks in order (executed copies land in scratch/executed/).
+# Extra arguments follow a task name directly (pixi 0.65 passes a `--` separator through, which argparse rejects).
+aggregate = "jupyter nbconvert --to notebook --execute --ExecutePreprocessor.timeout=7200 --ExecutePreprocessor.kernel_name=python3 --output-dir scratch/executed analyses/continents/0_aggregate_by_continent.ipynb analyses/mountain_ranges/0_aggregate_by_mountain_range.ipynb analyses/river_basins/0_aggregate_by_river_basin.ipynb"
+# one-off static inputs
+hillshade = "python pipeline/scripts/get_hillshade.py"                # Natural Earth -> World Robinson 1 km COG (no credentials)
+population = "python pipeline/scripts/get_basin_population.py"       # GPW population per HydroBASINS level-6 basin (Earth Engine) -> tracked CSV
+gtopo30 = "python pipeline/scripts/get_gtopo30_histogram.py"         # GTOPO30 land histogram (Earth Engine) -> tracked netCDF

@@ -1,7 +1,10 @@
 name: CI
 
-# Smoke test without secrets: the ci environment solves, the package imports, and the reduce runs
-# on two tracked fixture tiles (tests/README.md). Runs on every push and pull request.
+# Smoke test without secrets: the ci environment solves, the package imports, and the three
+# aggregation notebooks run headlessly on two tracked fixture tiles (tests/README.md) — the
+# reduce, the unit names, the per-unit metrics tables. The steps that need the Azure SAS token
+# (partials download, ERA5-Land zonal means) skip themselves when no token is present. Runs on
+# every push and pull request.
 
 on:
   push:
@@ -17,9 +20,9 @@ env:
   PRODUCTION_REPO_SHA: 18992fa7018d517a23f5507b28ec80edba2d0482
 
 jobs:
-  reduce:
+  aggregate:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,22 +42,34 @@ jobs:
           environments: ci
           cache: true
 
-      - name: Restore vector-source cache (GMBA / continents)
+      - name: Restore the BasinATLAS gdb (2.7 GB, downloaded once per cache key; the level-5 basin polygons of the basin metrics table)
         uses: actions/cache@v4
         with:
-          path: global_snowmelt_runoff_onset_analysis/data/geometries/sources
-          key: vector-sources-ci-v1
+          path: global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/BasinATLAS_Data_v10.gdb.zip
+          key: basinatlas-v10-gdb
 
       - name: Import the package
         working-directory: global_snowmelt_runoff_onset_analysis
         run: pixi run -e ci python -c "import gsro_analysis.aggregate, gsro_analysis.datacube, gsro_analysis.era5; print('ok')"
 
-      - name: Reduce the fixture partials (no credentials)
+      - name: Run the three aggregation notebooks on the fixture partials (no credentials)
         working-directory: global_snowmelt_runoff_onset_analysis
         env:
-          GSRO_AGGREGATED_ROOT: ${{ github.workspace }}/global_snowmelt_runoff_onset_analysis/tests/fixtures/aggregated_results
+          GSRO_PARTIALS_ROOT: ${{ github.workspace }}/global_snowmelt_runoff_onset_analysis/tests/fixtures/partials
+          GSRO_OUTPUT_ROOT: ${{ runner.temp }}/analyses
         run: |
-          pixi run -e ci python pipeline/scripts/reduce_partials.py --no-download
-          test -s tests/fixtures/aggregated_results/v10/mountain_ranges/all_mountain_ranges_fcf_lte_50.nc
-          test -s tests/fixtures/aggregated_results/v10/river_basins/all_river_basins_fcf_lte_50.nc
-          test -s tests/fixtures/aggregated_results/v10/continents/all_continents_full_dataset.nc
+          for nb in analyses/continents/0_aggregate_by_continent.ipynb \
+                    analyses/mountain_ranges/0_aggregate_by_mountain_range.ipynb \
+                    analyses/river_basins/0_aggregate_by_river_basin.ipynb; do
+            echo "::group::$nb"
+            pixi run -e ci jupyter nbconvert --to notebook --execute \
+              --ExecutePreprocessor.timeout=3000 --ExecutePreprocessor.kernel_name=python3 \
+              --output-dir "$RUNNER_TEMP/executed" "$nb"
+            echo "::endgroup::"
+          done
+          test -s "$RUNNER_TEMP/analyses/continents/data/aggregation/v10/all_continents_fcf_lte_50.nc"
+          test -s "$RUNNER_TEMP/analyses/continents/data/aggregation/v10/all_continents_full_dataset.nc"
+          test -s "$RUNNER_TEMP/analyses/mountain_ranges/data/aggregation/v10/all_mountain_ranges_fcf_lte_50.nc"
+          test -s "$RUNNER_TEMP/analyses/mountain_ranges/results/v10/mountain_range_metrics.csv"
+          test -s "$RUNNER_TEMP/analyses/river_basins/data/aggregation/v10/all_river_basins_fcf_lte_50.nc"
+          test -s "$RUNNER_TEMP/analyses/river_basins/results/v10/river_basin_metrics.csv"

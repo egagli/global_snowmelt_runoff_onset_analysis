@@ -2,8 +2,8 @@
 gsro_analysis — analysis-side helpers for the global snowmelt runoff onset
 dataset: paths (version-aware), settings (external-service IDs), datacube
 (per-tile UTM ancillary construction), aggregate (the map/reduce engine:
-partial sums -> cubes), stats, plotting, colorbars, world_maps, and
-results (provenance-stamped tables).
+partial sums -> cubes), plotting (polar panels), colorbars, world_maps, and
+results (provenance stamps for the tables the notebooks write).
 
 Submodules import lazily (PEP 562): ``import gsro_analysis`` (or importing
 ``paths``/``plotting``) does not drag in the heavy stack (xdem,
@@ -15,8 +15,8 @@ that want it.
 
 import importlib
 
-_SUBMODULES = ('aggregate', 'colorbars', 'datacube', 'era5', 'paths', 'plotting',
-               'results', 'settings', 'stats', 'world_maps')
+_SUBMODULES = ('aggregate', 'colorbars', 'datacube', 'era5', 'ledger', 'paths', 'plotting',
+               'results', 'settings', 'world_maps')
 
 
 def __getattr__(name):

@@ -1,22 +1,22 @@
 # pipeline
 
-Three waves of GitHub Actions workflows over the tiles, then local stages. The engine lives in
+Three waves of GitHub Actions workflows over the tiles, then the aggregation notebooks. The engine lives in
 [`gsro_analysis/datacube.py`](../gsro_analysis/datacube.py) (the ancillary store and the process step),
-[`gsro_analysis/era5.py`](../gsro_analysis/era5.py) (the ERA5-Land store),
+[`gsro_analysis/era5.py`](../gsro_analysis/era5.py) (the ERA5-Land store and the zonal join),
 [`gsro_analysis/ledger.py`](../gsro_analysis/ledger.py) (the shared icechunk ledger) and
-[`gsro_analysis/aggregate.py`](../gsro_analysis/aggregate.py) (the map `tile_partials`, the reduce
-`reduce_partials`); `scripts/` are the entry points; `pipeline.ipynb` is the operator's notebook (state,
-reset, work list and dispatch, one tile end to end, local stages). Lineage of every input from source to
-analysis, and the design notes: [docs/aggregation_lineage.md](../docs/aggregation_lineage.md).
+[`gsro_analysis/aggregate.py`](../gsro_analysis/aggregate.py) (the map `tile_partials`, the reduce math
+`reduce_partials`); `scripts/` are the workflow entry points plus the builders of the three static inputs
+(hillshade, GTOPO30 histogram, basin population); `pipeline.ipynb` is the operator's notebook (state, reset, work
+list and dispatch, one tile end to end). The reduce itself runs in the three notebooks
+`analyses/<unit>/0_aggregate_by_<unit>.ipynb`. Lineage of every input from source to analysis, and the design notes:
+[docs/aggregation_lineage.md](../docs/aggregation_lineage.md).
 
 | Wave / stage | Where | Entry point | Reads | Writes |
 | --- | --- | --- | --- | --- |
 | 1 Get ERA5-Land data (per **version**) | workflow, one job per water year | `scripts/era5_land.py` | ERA5-Land monthly (Earth Engine via xee, native 0.1° grid) | `snowmelt/snowmelt_runoff_onset_analysis/era5_land/<version>/era5_land`: ONE icechunk repo, the 8 variables on `(water_year, month, latitude, longitude)`, one commit per water year, plus the `anomaly` group (one commit) |
 | 2 Get ancillary data (once per **grid**) | workflow, ~2.5 min per tile | `scripts/build_ancillary_batch.py` → `datacube.build_ancillary_window` | Cop-DEM, CHILI (EE), snow class, WorldCover, forest cover, GMBA, BasinATLAS level 6, continents | `snowmelt/snowmelt_runoff_onset_analysis/ancillary/<version>_grid/ancillary`: ONE icechunk repo on the dataset grid (EPSG:4326, 0.00072°), 8 layers with compact int encodings, one chunk and one commit per tile |
 | 3 Process tiles to parquets (per **version**) | workflow, ~1 min per tile, no EE | `scripts/process_tiles_batch.py` → `datacube.process_tile` | the dataset store's tile window + the ancillary store's tile window | both reprojected onto the tile's 80 m UTM grid, slope + aspect derived, pixel table in memory → `snowmelt/snowmelt_runoff_onset_analysis/partials/<version>/tile_RRR_CCC.parquet` (partial sums for both filter tags × three unit types, ~0.1–1 MB); `keep_pixels`: also the pixel table `…/parquets/<version>/tile_RRR_CCC.parquet` (~35 MB) |
-| 4 ERA5 zonal | local | `scripts/era5_zonal.py` | anomaly group, GMBA + BasinATLAS polygons (level 5; `--units river_basins_l6` for level 6), pyramid masks | `aggregated_results/<version>/era5_zonal/era5_anomaly_<unit_type>.nc` |
-| 4 reduce | local | `scripts/reduce_partials.py` | the partials (auto-cached locally), GMBA/continents, `data/gtopo30_lat_elev_histogram.nc`, the zonal files | `aggregated_results/<version>/<group>/all_<group>_<filter>.nc` (`--groups` adds `river_basins_l6`, `continents_aspect`; `--mirror` → `snowmelt/snowmelt_runoff_onset_analysis/aggregated/<version>/`) |
-| 5 metrics | local | `scripts/range_metrics.py` | the mountain-range cube | `analyses/mountain_ranges/results/<version>/mountain_range_metrics.csv` |
+| 4 Aggregate (per **unit**) | local notebooks, minutes each | `analyses/<unit>/0_aggregate_by_<unit>.ipynb` (`pixi run aggregate` runs all three headlessly) | the partials (downloaded into `partials/<version>/`; re-runs fetch only new tiles); the unit's polygons (GMBA + continents from the web, BasinATLAS from the cached gdb); the ERA5-Land anomaly group (`era5.zonal_anomalies`: coverage × seasonal-snow × onset-validity weights from the public pyramid); the tracked GTOPO30 histogram and level-6 population table | `analyses/<unit>/data/aggregation/<version>/all_<unit>_<filter>.nc` (the level-6 basin and the continents-aspect cubes on request, flags at the top of the notebook), `era5_anomaly_<unit>.nc`, and the unit's metrics table `analyses/<unit>/results/<version>/<unit>_metrics.csv` (tracked) |
 
 ## What a "partials" row is
 
@@ -47,12 +47,13 @@ free `groupby` at reduce time while a finer one is a fleet re-map:
 
 - **River basins** are stored at HydroBASINS **level 6** (`settings.BASIN_ATLAS_LAYER`,
   six-digit `PFAF_ID`). Pfafstetter codes nest by digit prefix, so the default `river_basins` cube
-  (level 5, `PFAF_ID // 10`) is exact; `--groups river_basins_l6` writes the level-6 cube (run
-  `era5_zonal.py --units river_basins_l6` first for its ERA5 merge). Any level ≤ 6 is one more
-  entry in `aggregate.GROUPS`.
+  (level 5, `PFAF_ID // 10`) is exact; `BUILD_LEVEL6_CUBE = True` at the top of
+  `0_aggregate_by_river_basin.ipynb` also writes the level-6 cube and its ERA5 zonal means. Any level ≤ 6 is
+  one more entry in `aggregate.GROUPS`.
 - **Continents** carry the 24-bin **aspect** key. The default `continents` cube is latitude ×
-  elevation (aspect summed out, so flat pixels with no aspect still count); `--groups
-  continents_aspect` writes the latitude × elevation × aspect cube (drops the ~0.06 % flat pixels).
+  elevation (aspect summed out, so flat pixels with no aspect still count); `BUILD_ASPECT_CUBE = True` at
+  the top of `0_aggregate_by_continent.ipynb` also writes the latitude × elevation × aspect cube (drops the
+  ~0.06 % flat pixels).
 - **CHILI** is the fourth key of every unit type; `aggregate.collapse` folds it exactly on read.
 - **Filters** (`aggregate.FILTERS`): `fcf_lte_50` = seasonal snow class ≠ 4 (ephemeral) + WorldCover
   ∉ {50, 80} + 0 ≤ fcf ≤ 50 (the ≥ 0 bound also drops nodata); `full_dataset` = the first two only.
@@ -110,13 +111,14 @@ the same chunk) and makes ONE commit with QA metadata. The anomaly job then buil
 (every variable minus its per-pixel median over all water years) once every year is committed, and
 skips when it is current; a year committed after the anomaly marks it stale. A failed job commits
 nothing; re-dispatch until nothing remains. Acquisitions are never copied between versions; a new
-version re-acquires everything (~5 min per year in parallel, ~20 min for the anomaly). Then
-`scripts/era5_zonal.py --overwrite` and `scripts/reduce_partials.py` rerun. `start_fresh` (off by
-default) deletes the version's repository first — the only deletion the workflow can make.
+version re-acquires everything (~5 min per year in parallel, ~20 min for the anomaly). Then the aggregation
+notebooks rerun with `REBUILD_ERA5_ZONAL = True`. `start_fresh` (off by default) deletes the version's repository
+first — the only deletion the workflow can make.
 
 ## Validation aids
 
 The v9 per-tile parquets (`settings.V9_TILE_PARQUET_PREFIX`) are the reference for the tile-for-tile
 comparison in `pipeline.ipynb` (v9 tile (r, c) == v10 tile (r+2, c); v9 basin ids are level 5, i.e.
 `PFAF_ID // 10` of the current ones). `datacube.partials_from_pixel_table` backfills partials for a
-tile whose pixel table exists. `tests/` holds two fixture partials for the credential-free CI reduce.
+tile whose pixel table exists. `tests/fixtures/partials/v10/` holds two fixture tiles on which the CI executes
+the three aggregation notebooks without credentials.

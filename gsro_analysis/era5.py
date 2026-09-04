@@ -36,7 +36,6 @@ works headless) and the Azure SAS token (through the production ``Config``).
 
 import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import xarray as xr
@@ -399,16 +398,6 @@ def open_anomaly(config, repo=None, local_store=None, chunks='auto'):
     return open_era5_land(config, repo, chunks=chunks, group=ANOMALY_GROUP)
 
 
-def correlations_store_path(config):
-    """LOCAL output of the exploratory pixel-wise correlation notebook
-    (analyses/climate/pixelwise_climate_correlations.ipynb): a zarr under the
-    gitignored scratch/ folder, keyed by dataset version. Its own product,
-    read by nothing else, so it never goes to Azure (2026-09-03)."""
-    from gsro_analysis import paths
-    paths.SCRATCH.mkdir(parents=True, exist_ok=True)
-    return paths.SCRATCH / f"{config.version}_runoff_onset_and_era5_eqearth_anomaly_correlations.zarr"
-
-
 # ---------------------------------------------------------------------------
 # zonal anomalies per analysis unit (replaces the per-range rio.clip join
 # that used to live in stage 2 and needed a 16 GB machine)
@@ -574,128 +563,3 @@ def zonal_anomalies(config, units_gdf, id_col, unit_dim=None, variables=None,
         "dataset_version": config.version, "unit_id_column": id_col,
     })
     return ds
-
-
-# ---------------------------------------------------------------------------
-# on-the-fly Equal Earth derivation (replaces the retired standing stores)
-
-def to_equal_earth(ds):
-    """Reproject to EPSG:8857 (Equal Earth) — equal-area pixels for global
-    maps/statistics. Derive, don't materialize."""
-    import odc.geo.xr  # noqa: F401  -- registers the .odc accessor
-    return ds.odc.reproject("EPSG:8857")
-
-
-def pixelwise_correlations(config, variables=None, level=7, out_path=None,
-                           progress=print):
-    """Per-pixel Pearson correlation across water years between the
-    runoff-onset anomaly and each ERA5-Land variable's monthly anomaly, on
-    the Equal-Earth grid of :func:`combined_anomaly_eqearth` and with its
-    exact semantics (ERA5 reprojected to EPSG:8857 nearest-neighbour and
-    masked per year to onset-valid pixels; every anomaly vs the median over
-    all water years; the onset anomaly masked to valid-median pixels; the
-    pyramid's yearly ``temporal_resolution`` correlated too and broadcast
-    over month) — but streamed one (variable, water year) slab at a time
-    (~3 GB peak, no cluster) instead of one dask graph over the whole ~20 GB
-    stack, which never converged on a 16 GB box (2026-09-03).
-
-    Writes a zarr with dims ``(month, y, x)`` at ``out_path`` (default
-    :func:`correlations_store_path`, local under scratch/) and returns the
-    path. The exploratory ``analyses/climate/pixelwise_climate_correlations``
-    notebook is its only caller."""
-    import odc.geo.xr  # noqa: F401  -- registers the .odc accessor
-    import rioxarray  # noqa: F401
-    from gsro_analysis.datacube import open_coarse_onset
-
-    stack = open_era5_land(config)
-    variables = list(variables or [v for v in VARIABLES if v in stack])
-    years = [int(y) for y in stack.water_year.values]
-    months = list(stack.month.values)
-
-    # the target grid: what to_equal_earth gives the whole stack (one slab is enough to fix it)
-    template = to_equal_earth(stack[variables[0]].isel(water_year=0, month=0)
-                              .to_dataset()).compute()
-    geobox = template.odc.geobox
-    ny, nx = geobox.shape
-
-    # the coarse onset (public pyramid, ~10 km) on that grid, years aligned with the stack
-    coarse = open_coarse_onset(config, level)[['runoff_onset', 'runoff_onset_median',
-                                                'temporal_resolution']]
-    onset = coarse.rio.reproject_match(template).reindex(water_year=years)
-    valid = onset['runoff_onset'].notnull()                          # (water_year, y, x)
-    onset_anom = (onset['runoff_onset'] - onset['runoff_onset'].median('water_year')
-                  ).where(onset['runoff_onset_median'] > 0)
-    coords = {'water_year': years, 'y': template.y, 'x': template.x}
-
-    def corr_with_onset(da):
-        anom = da - da.median('water_year')
-        return xr.corr(onset_anom, anom, dim='water_year').values.astype('float32')
-
-    out = {}
-    for v in variables:
-        cube = np.empty((len(years), len(months), ny, nx), dtype='float32')
-        for j, y in enumerate(years):
-            slab = stack[v].sel(water_year=y).load()                 # (month, lat, lon), ~230 MB
-            cube[j] = slab.odc.reproject(geobox).values
-            del slab
-        r = np.full((len(months), ny, nx), np.nan, dtype='float32')
-        for mi in range(len(months)):
-            da = xr.DataArray(cube[:, mi], dims=('water_year', 'y', 'x'), coords=coords).where(valid)
-            r[mi] = corr_with_onset(da)
-            del da
-        out[v] = (('month', 'y', 'x'), r)
-        del cube
-        progress(f"{v} done")
-    tr = corr_with_onset(onset['temporal_resolution'])
-    out['temporal_resolution'] = (('month', 'y', 'x'), np.broadcast_to(tr, (len(months), ny, nx)).copy())
-
-    ds = xr.Dataset(out, coords={'month': months, 'y': template.y, 'x': template.x,
-                                 'spatial_ref': template['spatial_ref']})
-    ds.attrs.update({
-        'method': ('Pearson r across water years of the runoff-onset anomaly (public pyramid level '
-                   f'{level}, nearest) vs each ERA5-Land monthly anomaly, both on the Equal Earth grid of '
-                   'to_equal_earth; ERA5 masked per year to onset-valid pixels; anomalies vs the median '
-                   'over all water years; onset anomaly masked to valid-median pixels'),
-        'water_years': years, 'dataset_version': config.version,
-    })
-    for name in list(ds.variables):
-        ds[name].encoding = {}
-    ds = ds.chunk({'month': -1, 'y': 512, 'x': 512})
-    path = out_path or correlations_store_path(config)
-    ds.to_zarr(path, mode='w')
-    progress(f"wrote {path}")
-    return path
-
-
-def combined_anomaly_eqearth(config, coarse_onset_ds=None):
-    """The on-the-fly replacement for the retired
-    ``combined_runoff_onset_and_era5_eqearth_anomaly_ds`` store: raw ERA5
-    stack reprojected to Equal Earth, masked to onset-valid pixels, merged
-    with the coarse onset dataset, then anomalies vs the all-year median
-    (onset anomaly masked to valid-median pixels) — the exact semantics of
-    the old combine + anomaly steps, computed lazily.
-
-    ``coarse_onset_ds``: a coarse-resolution onset dataset; defaults to
-    ``datacube.open_coarse_onset(config, level=7)`` (~10 km, matches
-    ERA5-Land).
-    """
-    if coarse_onset_ds is None:
-        from gsro_analysis.datacube import open_coarse_onset
-        coarse_onset_ds = open_coarse_onset(config, level=7)
-
-    era5_proj = to_equal_earth(open_era5_land(config))
-    onset_proj = coarse_onset_ds.rio.reproject_match(era5_proj)
-    era5_masked = era5_proj.where(onset_proj['runoff_onset'].notnull())
-    combined = xr.merge([onset_proj, era5_masked], compat='override')
-
-    static = [v for v in ('runoff_onset_median', 'runoff_onset_mad',
-                          'temporal_resolution_median') if v in combined]
-    median = combined.drop_vars(static).median(dim='water_year')
-    anomaly = combined - median
-    if 'runoff_onset_median' in combined:
-        anomaly['runoff_onset'] = anomaly['runoff_onset'].where(
-            combined['runoff_onset_median'] > 0)
-    else:
-        warnings.warn("no runoff_onset_median in coarse onset dataset; "
-                      "onset anomaly left unmasked")
-    return anomaly

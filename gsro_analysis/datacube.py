@@ -166,12 +166,11 @@ def add_forest_cover(tile,ds,mask_nodata=True):
 def add_mountain_range_and_basin_and_continent(tile, ds, log=print):
     from geocube.api.core import make_geocube
 
-    # vector sources are downloaded ONCE into data/geometries/sources/ —
-    # never fetched over the network per tile (BasinATLAS is ~1.9 GB and
+    # vector sources are downloaded ONCE into analyses/<unit>/data/geometries/ —
+    # never fetched over the network per tile (BasinATLAS is ~2.7 GB and
     # figshare intermittently 202s, which corrupted a tile on 2026-08-24)
-    gmba_zip = settings.cached_source(settings.GMBA_URL)
     gmba_clipped_gdf = gpd.read_file(
-        gmba_zip, mask=tile.bbox_gdf).clip(tile.bbox_gdf)
+        settings.gmba_zip(), mask=tile.bbox_gdf).clip(tile.bbox_gdf)
 
     if gmba_clipped_gdf.empty:
         log(f"tile {tile.row},{tile.col}: no mountain ranges in the tile, id layer filled with -9999")
@@ -185,10 +184,7 @@ def add_mountain_range_and_basin_and_continent(tile, ds, log=print):
 
         ds['GMBA_V2_ID'] = out_grid['GMBA_V2_ID'].rio.reproject_match(ds['dem'],resampling=rasterio.enums.Resampling.mode)
 
-    basins_zip = settings.cached_source(settings.BASIN_ATLAS_URL,
-                                        filename='BasinATLAS_Data_v10.gdb.zip',
-                                        expected_md5=settings.BASIN_ATLAS_MD5)
-    basins_gdf = gpd.read_file(basins_zip, mask=tile.bbox_gdf,
+    basins_gdf = gpd.read_file(settings.basin_atlas_gdb(), mask=tile.bbox_gdf,
                                layer=settings.BASIN_ATLAS_LAYER)
     basins_clipped_gdf = basins_gdf.clip(tile.bbox_gdf)
 
@@ -204,7 +200,7 @@ def add_mountain_range_and_basin_and_continent(tile, ds, log=print):
         
         ds['PFAF_ID'] = out_grid['PFAF_ID'].rio.reproject_match(ds['dem'],resampling=rasterio.enums.Resampling.mode)
 
-    continents_gdf = gpd.read_file(settings.cached_source(settings.CONTINENTS_URL))
+    continents_gdf = gpd.read_file(settings.continents_zip())
     # NOTE: the integer continent encoding is the alphabetical order of
     # np.unique — aggregate.CONTINENTS_ENUM must match it, and the ancillary
     # build stamps it into the tile attrs so downstream code can assert.
@@ -371,7 +367,7 @@ def build_ancillary_template(config):
     for name in ANCILLARY_LAYERS:
         ds[name].attrs.update(LAYER_ATTRS[name])
         ds[name].attrs['grid_mapping'] = 'spatial_ref'
-    continents_gdf = gpd.read_file(settings.cached_source(settings.CONTINENTS_URL))
+    continents_gdf = gpd.read_file(settings.continents_zip())
     enum = list(np.unique(list(continents_gdf.CONTINENT)))
     ds.attrs.update({
         'title': 'Static ancillary layers of the global snowmelt runoff onset analyses, on the dataset grid',
@@ -892,11 +888,3 @@ def process_tile(config, row, col, global_ds=None, keep_pixels=False,
         log(f"tile {row},{col}:   pixel table written -> {parquet_tile_path(config, row, col)}")
     n_rows = write_partials(df, config, row, col, filter_tags=filter_tags, log=log)
     return len(df), n_rows
-
-
-def open_coarse_onset(config, level=5):
-    """Coarse-resolution runoff-onset dataset for masking/joining against
-    other gridded products: the public multiscale pyramid (level n ~
-    80 m * 2**n; 5 ~ 2.6 km, 7 ~ 10 km ~ ERA5-Land), anonymous."""
-    from global_snowmelt_runoff_onset.pyramid import open_pyramid_level
-    return open_pyramid_level(config, level).rio.write_crs("EPSG:4326")

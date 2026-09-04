@@ -129,7 +129,7 @@ ANCILLARY_PREFIX = "snowmelt/snowmelt_runoff_onset_analysis/ancillary"        # 
 PARTIALS_PREFIX = "snowmelt/snowmelt_runoff_onset_analysis/partials"          # + /<version>/tile_RRR_CCC.parquet  (the fleet product)
 ANALYSIS_PARQUET_PREFIX = "snowmelt/snowmelt_runoff_onset_analysis/parquets"  # + /<version>/tile_RRR_CCC.parquet  (opt-in pixel tables)
 ERA5_LAND_PREFIX = "snowmelt/snowmelt_runoff_onset_analysis/era5_land"        # + /<version>/era5_land  (ONE icechunk repo: acquisition + anomaly group)
-AGGREGATED_PREFIX = "snowmelt/snowmelt_runoff_onset_analysis/aggregated"      # + /<version>/  (mirror of aggregated_results/<version>)
+AGGREGATED_PREFIX = "snowmelt/snowmelt_runoff_onset_analysis/aggregated"      # + /<version>/  (legacy mirror of the cubes; nothing writes it any more)
 
 
 # v9 per-tile parquets: kept ONLY as the validation reference for the
@@ -153,7 +153,7 @@ BASIN_ATLAS_MD5 = "69af94baee68da5a3f80f09e7b85bd04"   # from the figshare API
 # 2026-09-02; ~16,400 basins, six-digit PFAF_ID, int32). Pfafstetter codes
 # are prefix-hierarchical, so every coarser level is derived at reduce time
 # (level j = PFAF_ID // 10**(6 - j)); the default `river_basins` cube is level
-# 5 and the analyses, era5_zonal.py and the population join use level-5
+# 5 and the analyses, the zonal means and the population join use level-5
 # polygons (basin_atlas_layer(5)). Changing this after a campaign means a
 # fleet pass (datacube.refresh_unit_layers + re-map).
 BASIN_ATLAS_STORED_LEVEL = 6
@@ -167,15 +167,34 @@ def basin_atlas_layer(level):
 
 
 def basin_atlas_gdb():
-    """The cached BasinATLAS gdb zip (downloaded once, md5-verified)."""
+    """The BasinATLAS v1.0 gdb zip (2.7 GB), downloaded once (md5-verified) into
+    ``analyses/river_basins/data/geometries/``. The fleet, the CI and the river-basin notebooks
+    all read HydroBASINS polygons from this file: figshare sits behind a bot challenge and GDAL
+    cannot stream the gdb, so this is the one vector source that must be cached."""
+    from gsro_analysis import paths
     return cached_source(BASIN_ATLAS_URL, filename='BasinATLAS_Data_v10.gdb.zip',
-                        expected_md5=BASIN_ATLAS_MD5)
+                        expected_md5=BASIN_ATLAS_MD5, dest_dir=paths.geometries('river_basins'))
+
+
+def gmba_zip():
+    """The GMBA Inventory v2.0 standard-300 zip cached in ``analyses/mountain_ranges/data/geometries/``
+    for the FLEET (the ancillary build must never hit the network per tile; the Actions cache
+    restores it). The notebooks read the same file straight from the web: ``gpd.read_file('zip+' + GMBA_URL)``."""
+    from gsro_analysis import paths
+    return cached_source(GMBA_URL, dest_dir=paths.geometries('mountain_ranges'))
+
+
+def continents_zip():
+    """The USGS continents zip cached in ``analyses/continents/data/geometries/`` for the fleet
+    (same reasoning as :func:`gmba_zip`); the notebooks read ``'zip+' + CONTINENTS_URL`` directly."""
+    from gsro_analysis import paths
+    return cached_source(CONTINENTS_URL, dest_dir=paths.geometries('continents'))
 
 
 def cached_source(url, filename=None, max_retries=6, backoff=20,
-                  expected_md5=None):
-    """Download ``url`` once into ``data/geometries/sources/`` and return
-    the local Path.
+                  expected_md5=None, dest_dir=None):
+    """Download ``url`` once into ``dest_dir`` (default ``data/sources/``) and
+    return the local Path.
 
     The per-tile ancillary build must NEVER hit these vector sources over
     the network per tile: BasinATLAS alone is ~2.5 GB, and the direct
@@ -191,7 +210,8 @@ def cached_source(url, filename=None, max_retries=6, backoff=20,
 
     from gsro_analysis import paths
 
-    dest_dir = paths.GEOMETRIES / "sources"
+    from pathlib import Path
+    dest_dir = Path(dest_dir) if dest_dir else paths.DATA / "sources"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / (filename or url.rstrip("/").split("/")[-1])
     if dest.exists() and dest.stat().st_size > 0:
@@ -227,6 +247,19 @@ def cached_source(url, filename=None, max_retries=6, backoff=20,
         time.sleep(backoff)
     raise RuntimeError(f"failed to download {url} after {max_retries} attempts "
                        f"(last status: {last_status})")
+# World Bank Data Catalog, "Major Rivers of the World" (98 named rivers; ESRI Data & Maps origin,
+# redistributed by the World Bank under its open terms): the rivers overlay of the basin maps,
+# read straight from the zip by analyses/river_basins/basin_onset.ipynb
+MAJOR_RIVERS_URL = ("https://datacatalogfiles.worldbank.org/ddh-published/0042032/1/DR0052537/"
+                    "majorrivers_0_0.zip")
+# Earth Engine assets of pipeline/scripts/get_basin_population.py: GPW v4.11 population count
+# (CIESIN, 30 arc-second) summed per HydroBASINS v1 level-6 basin (the level the partials are keyed by)
+GPW_POPULATION_COLLECTION = "CIESIN/GPWv411/GPW_Population_Count"
+HYDROBASINS_LEVEL6_ASSET = "WWF/HydroSHEDS/v1/Basins/hybas_6"
+# Natural Earth "Gray Earth with Shaded Relief, Hypsography, Ocean Bottom, and Drainages"
+# (10 m raster, public domain): the source of data/global_hillshade_robinson.tif, the grey
+# basemap of the world maps, the basin maps and the case study (pipeline/scripts/get_hillshade.py)
+HILLSHADE_URL = "https://naturalearth.s3.amazonaws.com/10m_raster/GRAY_HR_SR_OB_DR.zip"
 # account is uwcryo (the old snowmelt.blob... hostname is gone — NXDOMAIN);
 # the blob is anonymously readable, no SAS needed
 FOREST_COVER_FRACTION_URL = (

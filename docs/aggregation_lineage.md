@@ -7,7 +7,11 @@ cubes in 2025 (retired 2026-08-26) and the map/reduce pipeline that replaced it 
 Mechanics of the current pipeline (ledgers, fleet sizing, redo recipes) are in
 [pipeline/README.md](../pipeline/README.md). Written 2026-09-02; the decisions at the end were
 implemented on 2026-09-03 (HydroBASINS level 6 stored, level 5 derived; the continents aspect key;
-two filter tags).
+two filter tags). On 2026-09-04 the three local-stage scripts became the per-unit aggregation notebooks
+`analyses/<unit>/0_aggregate_by_<unit>.ipynb` (`reduce_partials.py` and `era5_zonal.py` → the reduce and
+zonal-mean sections of each, `range_metrics.py` → the metrics section of the mountain-range notebook, a
+per-basin metrics table added to the river-basin one); the cubes moved from `aggregated_results/<version>/` to
+`analyses/<unit>/data/aggregation/<version>/`. The design notes below keep the script names they were written with.
 
 ## The two workflows at a glance
 
@@ -63,7 +67,7 @@ flowchart LR
     ds["runoff-onset dataset v10<br/>icechunk store, WY2015-2025"]:::src
     anc["Cop-DEM · CHILI (EE) · snow class<br/>WorldCover · FCF · GMBA · BasinATLAS · continents"]:::src
     era["ERA5-Land monthly (EE)"]:::src
-    gt["data/gtopo30_lat_elev_histogram.nc"]:::src
+    gt["continents/data/gtopo30_lat_elev_histogram.nc"]:::src
     lay["label_layout.csv"]:::src
   end
   subgraph F["GitHub Actions waves · per tile"]
@@ -71,16 +75,16 @@ flowchart LR
     a1["Process tiles to parquets: both windows -> 80 m UTM<br/>slope + aspect from the UTM DEM, tabulate in memory"]:::mid
     m["map: tile_partials<br/>filter x unit x bins x CHILI class<br/>n, Σx, Σx², Σxy · 83 columns"]:::mid
   end
-  subgraph L["Local · minutes"]
-    r["reduce_partials.py<br/>groupby.sum → mean, std, r"]:::mid
-    z["era5_zonal.py<br/>sparse weights, all units"]:::mid
-    k["range_metrics.py"]:::mid
+  subgraph L["Local · minutes · analyses/&lt;unit&gt;/0_aggregate_by_&lt;unit&gt;.ipynb"]
+    r["reduce: groupby.sum → mean, std, r<br/>(aggregate.reduce_partials)"]:::mid
+    z["ERA5 zonal means<br/>(era5.zonal_anomalies: sparse weights, all units)"]:::mid
+    k["per-unit metrics table"]:::mid
   end
   e1["era5_land/v10 icechunk repo<br/>one commit per water year + anomaly group"]:::mid
   cube[("all_mountain_ranges_&lt;filter&gt;.nc<br/>range x elev x aspect x chili x WY<br/>var · var_std · var_n · corr · ERA5")]:::out
   cubeb[("all_river_basins_&lt;filter&gt;.nc<br/>level 5 = level-6 rows // 10")]:::out
   cubec[("all_continents_&lt;filter&gt;.nc<br/>lat x elev (aspect summed out) + dem_pixel_count")]:::out
-  res[("mountain_range_metrics.csv<br/>(joined to GMBA on read)")]:::out
+  res[("mountain_range_metrics.csv · river_basin_metrics.csv<br/>(joined to the polygons on read)")]:::out
   nb["notebooks under analyses/"]:::use
   nb2["*_composite_figure.ipynb<br/>sweeps + world_maps → the two inset world maps"]:::use
   ds --> a1
@@ -137,18 +141,18 @@ method to 0.01–0.06 K mean absolute difference.
 | --- | --- | --- | --- | --- | --- |
 | Runoff onset per pixel | v10 icechunk store (extended grid, WY2015–2025), read per tile window with CF decoding | reprojected bilinearly onto the stored ancillary grid; tabulated **in memory** (same columns as before); the pixel parquet is opt-in (`--keep-pixels`) and nothing downstream reads it | `aggregate.tile_partials`: per filter tag × unit type, keys (unit id, elevation bin, aspect or latitude bin, CHILI class) factorized once; `np.bincount` sums per key: `n, Σmedian, Σmedian²`, `n/Σ/Σ²` MAD, Σ temporal resolution, Σ valid-year count, and per water year `n, Σonset, Σonset², Σanomaly, Σanomaly²` (85 columns) → one partials parquet per tile (0.1–1 MB). `reduce_partials`: `groupby(keys).sum` over all tiles → mean = Σx/n, std = √(Σx²/n − mean²) | dims `unit × bins × chili_class(4) × water_year`; variables `<var>`, `<var>_std`, `<var>_n` for median, MAD, onset, anomaly; `temporal_resolution_median`, `n_years`; float32 means, int32 counts; attrs record `filter_tag`, the predicates, the class thresholds and the statistic definitions | `aggregate.open_aggregate` → `stats.prepare_mountain_ranges` (exact CHILI collapse, n > 100, 30 % year rule, tropical-Andes rule, `elev_relative` and range mean anomaly computed on read); `weighted_mean`, `threshold` everywhere else |
 | Terrain | Copernicus DEM GLO-30 (Planetary Computer) | compact integer layers in the per-grid ancillary zarr (~8 MB/tile, built once per grid, reused across dataset versions); lat/lon recomputed from UTM x/y | half-open bins `[left, right)`: 100 m elevation 0–9000, 15° aspect with 360° wrapped to north (ranges and, since 2026-09-03, continents — flat pixels keep an undefined aspect there), 1° latitude over the whole globe for continents; the default continents cube sums the aspect out, `continents_aspect` keeps it | bin-centre coordinates with `bin_edges` in attrs | everything binned |
-| CHILI (insolation) | Earth Engine via `easysnowdata` | ancillary layer (uint16, scaled); pixel column | a cube **dimension** for every unit type: cool / neutral / warm / none (no CHILI value); pixel-level Pearson r of CHILI vs the pixel median per geometric bin from six sums (`n ≥ 3`), summed over classes | `chili_class` axis; `chili_corr`, `chili_corr_n` | `aggregate.collapse` folds the axis exactly for the range analyses; `global/sunny_shaded` reads the classes |
+| CHILI (insolation) | Earth Engine via `easysnowdata` | ancillary layer (uint16, scaled); pixel column | a cube **dimension** for every unit type: cool / neutral / warm / none (no CHILI value); pixel-level Pearson r of CHILI vs the pixel median per geometric bin from six sums (`n ≥ 3`), summed over classes | `chili_class` axis; `chili_corr`, `chili_corr_n` | `aggregate.collapse` folds the axis exactly for the range analyses; `continents/sunny_shaded` reads the classes |
 | Snow class, WorldCover, forest cover | as before (FCF mirror on uwcryo) | ancillary layers; pixel columns | named predicate sets `aggregate.FILTERS` applied in the map, both tags (`fcf_lte_50`, `full_dataset`) emitted in the same pass; FCF correlation only over pixels with FCF coverage | one cube per (unit type, filter tag), filter recorded in filename and attrs; `fcf_corr`, `fcf_corr_n` | notebooks open `fcf_lte_50` (the analyses' rule) explicitly |
 | Unit membership | GMBA v2, BasinATLAS **lev06** (since 2026-09-03; lev05 before), USGS continents, downloaded once into `data/geometries/sources/` | integer id layers in the ancillary (`GMBA_V2_ID` int32, `PFAF_ID` int32 six-digit, `continent` int8), rasterized with `geocube` at 0.0003° and mode-resampled onto the 80 m grid; `datacube.refresh_unit_layers` rewrites them in place | part of the map key; the reduce derives the level-5 basin id (`PFAF_ID // 10`) for the default `river_basins` cube, names ranges (`MapName` / `Level_04`), adds centroids and continent, names continents (Australia → Oceania) on a fixed six-continent axis so partial versions still run | `mountain_range`, `river_basin`, `continent` dimensions | range names; display-range lists filtered to what exists |
 | Marginals | the cubes themselves | — | not stored: `weighted_mean(ds, var, dims)` (count-weighted, exact), `collapse`, `threshold`, `elevation_relative` at read time | — | basin means for the choropleths, range mean anomalies, elevation profiles |
 | ERA5-Land anomalies | ERA5-Land monthly via Earth Engine (`Get ERA5-Land data` workflow, one job per water year, `ee.data.computePixels` on the native 0.1° grid) | one icechunk repository `era5_land/<version>/era5_land`: the 8 variables on `(water_year, month, latitude, longitude)`, one commit per water year, plus the `anomaly` group (minus the per-pixel median over all water years; base period in attrs and commit metadata); the commit history is the ledger; Equal-Earth products derived on the fly | `era5.zonal_anomalies`: a sparse coverage matrix (polygon fraction per 0.1° cell, 5 × 5 subcells) times per-year cell weights (seasonal-snow fraction × onset validity from the public pyramid) → weighted zonal mean per unit, variable, water year and month, for all units in one streamed pass (~4 min for 289 ranges, ~3.5 min for the 16,341 level-6 basins); cells under 0.25 total weight → NaN | `aggregated_results/<v>/era5_zonal/era5_anomaly_<unit_type>.nc` on `(unit, water_year, month)` plus `zonal_weight`; merged into the range and basin cubes by the reduce; `stats.seasonal_means` adds `spring_months_mean` etc. on read | `range_metrics.py` (OLS + Theil–Sen sensitivity per range → the metrics table); `temperature_sensitivity.ipynb`; the per-range scatter sweep of the temperature-sensitivity world map |
-| Land area reference | GTOPO30 histogram, seeded from the v9 file and tracked as `data/gtopo30_lat_elev_histogram.nc` (40 KB); `reduce_partials.py --build-gtopo30` regenerates it via Earth Engine | — | merged by the reduce | `dem_pixel_count` in the continents cube | `global/lat_elev_binning` |
+| Land area reference | GTOPO30 histogram, seeded from the v9 file and tracked as `analyses/continents/data/gtopo30_lat_elev_histogram.nc` (40 KB); `pipeline/scripts/get_gtopo30_histogram.py` regenerates it via Earth Engine (2026-09-04: cell for cell identical) | — | merged by the continents aggregation notebook | `dem_pixel_count` in the continents cube | `continents/lat_elev_binning` |
 | Curated label layout | `analyses/mountain_ranges/label_layout.csv` (45 rows: display flags, per-map anchors in Robinson metres) | — | joined on read by `world_maps.prepare` to the metrics table + GMBA polygons (`stats.range_metrics_gdf`) | which 40 / 30 ranges get an inset and where | the two composite-figure notebooks |
 
-Downstream: the topic notebooks under `analyses/` (`global/`, `mountain_ranges/`,
-`river_basins/`, the Sierra Nevada case study, which reads the store directly),
-`pipeline/scripts/range_metrics.py` feeding the provenance-stamped metrics table, and the two
-composite notebooks driving `gsro_analysis/world_maps.py`. Cost: ~0.1–1 MB of partials per tile
+Downstream: the topic notebooks under `analyses/` (`continents/`, `mountain_ranges/`,
+`river_basins/`, the Sierra Nevada case study, which reads the store directly), the per-unit
+metrics tables written by the aggregation notebooks, and the two composite notebooks driving
+`gsro_analysis/world_maps.py`. Cost: ~0.1–1 MB of partials per tile
 (2–4 GB per version), a reduce of minutes and under 1 GB, no filter copies, no pixel tables
 unless asked for.
 
@@ -163,7 +167,7 @@ unless asked for.
 | Bin edges | `pd.cut`, `(left, right]`; 0 m pixels dropped | half-open `[left, right)`; aspect 360 → 0 | edge pixels move one bin; documented in `aggregate.py` |
 | ERA5 zonal means | per-range clip and reproject, ~30 s each, sequential, skip list | one sparse weighted pass for all units | basins get ERA5 too; same semantics expressed as weights |
 | Compute | dask scan of ~4,000 parquets per unit on a 16 GB cluster | fleet map (~2.5 min/tile) + pandas reduce on a laptop | stage 2 reruns in minutes after any fleet change |
-| Per-range numbers | computed inside `era5_analysis.ipynb`, geojson written by the notebook | `range_metrics.py` → one provenance-stamped CSV, joined to the GMBA polygons on read; notebooks only plot | quoted numbers carry two git SHAs (production package, this repo) |
+| Per-range numbers | computed inside `era5_analysis.ipynb`, geojson written by the notebook | the metrics section of `0_aggregate_by_mountain_range.ipynb` → one provenance-stamped CSV, joined to the GMBA polygons on read; notebooks only plot | quoted numbers carry two git SHAs (production package, this repo) |
 | The two world maps | a GIS project outside the repository over notebook-made insets | `world_maps.py` + two composite notebooks + `label_layout.csv` | reproducible from the repo on any platform |
 
 ### Why there is no v9 cube in the new schema
@@ -296,9 +300,9 @@ multiplies partial rows and the dense cube by up to 4: still 0.1–1 MB per tile
 range cube, ~68 MB per yearly variable (179 × 90 × 24 × 4 × 11 × 4 B). Two pixel-level
 correlation columns (`chili_corr`, `fcf_corr`) ride along for every unit type.
 
-**Who reads it today.** Continents only: `global/lat_elev_binning` (warm − cool onset difference
-and ratio per latitude × elevation bin), `global/sunny_shaded` (seasonal modulation),
-`global/lapse_rates`, and `chili_corr`. Ranges and basins collapse the axis on read
+**Who reads it today.** Continents only: `continents/lat_elev_binning` (warm − cool onset difference
+and ratio per latitude × elevation bin), `continents/sunny_shaded` (seasonal modulation),
+`continents/lapse_rates`, and `chili_corr`. Ranges and basins collapse the axis on read
 (`stats.prepare_mountain_ranges`, `stats.basin_summary`); no range- or basin-level analysis uses
 CHILI yet. Aspect already carries most of the insolation signal for ranges, but CHILI integrates
 slope and horizon shading that aspect alone does not.
@@ -348,7 +352,7 @@ between all year pairs grow quadratically and should be added only for a named q
 continents** (the partials carry the 24-bin aspect key; the reduce keeps writing the
 `continent × latitude × elevation × chili_class × water_year` cube by default and a
 `continents_aspect` cube on request — `reduce_partials.py --groups continents_aspect`, ~3 MB compressed for
-five tiles, 14 s — so the `global/` notebooks are unchanged). Not added: per-year
+five tiles, 14 s — so the `continents/` notebooks are unchanged). Not added: per-year
 temporal resolution (kept as a future option: Σ and n per water year, one column pair, a re-map after
 the campaign) and the Σ onset_y · median product (it would give, per bin, the pixel-level regression of
 each year's onset on the pixel climatology; no analysis asks for it).

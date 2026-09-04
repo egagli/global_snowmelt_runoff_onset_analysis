@@ -10,17 +10,17 @@ positions): ``analyses/mountain_ranges/topography_triplet_composite_figure.ipynb
 
 Inputs (all pipeline products or tracked files; nothing figure-specific except the label table):
 
-* ``stats_gdf``: GMBA polygons + per-range metrics, one row per range, any CRS
-  (``stats.range_metrics_gdf(version)``: GMBA joined on read with
-  ``results/<version>/mountain_range_metrics.csv``). Columns used: ``GMBA_V2_ID``, ``MapName``,
+* ``stats_gdf``: GMBA polygons + per-range metrics, one row per range, any CRS (the GMBA
+  inventory merged on ``GMBA_V2_ID`` with ``results/<version>/mountain_range_metrics.csv``, the
+  table ``0_aggregate_by_mountain_range.ipynb`` writes). Columns used: ``GMBA_V2_ID``, ``MapName``,
   ``Level_04``, ``anomaly_slope``, ``anomaly_corr``, ``snowmelt_lapse_rate_per_100m``,
   ``snowmelt_lapse_rate_n``.
 * ``analyses/mountain_ranges/label_layout.csv``: the curated display flags and the hand-placed
   label anchors in World Robinson metres (``display_map``, ``display_label``,
   ``show_topo``/``show_anom``, ``topo_x/y``, ``anom_x/y``). An anchor is the BOTTOM-LEFT corner
   of the label block. The only input that is neither data nor code.
-* the per-range sweep PNGs (``figures/<version>/{triplets,anomaly_scatterplots}/pngs``), the
-  triplet legend PNG and the hillshade GeoTIFF in ``data/``. The 60° x 30° graticule is
+* the per-range sweep PNGs (``figures/<version>/{triplets,anomaly_scatterplots}/``), the
+  triplet legend PNG and the hillshade GeoTIFF in ``data/`` (``pipeline/scripts/get_hillshade.py``). The 60° x 30° graticule is
   generated here.
 
 Page model: a figure of the page size (mm); a map axes in projected metres over the map item;
@@ -49,8 +49,10 @@ page) after any change; the ``plot_*`` functions warn when it finds one.
 
 Usage::
 
-    from gsro_analysis import stats, world_maps
-    stats_gdf = stats.range_metrics_gdf(config.version)
+    from gsro_analysis import world_maps
+    metrics_df = pd.read_csv(paths.resultsdir('mountain_ranges', config.version) / 'mountain_range_metrics.csv')
+    gmba_gdf = gpd.read_file('zip+' + settings.GMBA_URL)
+    stats_gdf = gmba_gdf[['GMBA_V2_ID', 'MapName', 'Level_04', 'geometry']].merge(metrics_df.drop(columns=['name']), on='GMBA_V2_ID')
     fig, placed = world_maps.plot_lapse_rate_triplet_map(
         stats_gdf, config.version,
         out=paths.figdir('mountain_ranges', config.version) / 'global_lapse_rates_with_triplets_map.png')
@@ -80,7 +82,7 @@ from gsro_analysis import colorbars, paths
 CRS = 'ESRI:54030'                       # World Robinson, +proj=robin +datum=WGS84 +units=m
 MM_PER_PT = 25.4 / 72
 LAYOUT_CSV = paths.ANALYSES / 'mountain_ranges' / 'label_layout.csv'
-HILLSHADE = paths.DATA / 'global_hillshade_robinson.tif'
+HILLSHADE = paths.hillshade()               # built by pipeline/scripts/get_hillshade.py
 HILLSHADE_STRETCH = (1, 231)             # single-band grey, linear 1 -> 231 (black -> white)
 GRATICULE_DEG = (60, 30)                 # graticule cell size (lon, lat) in degrees
 FONT_FAMILIES = ('Arial', 'Liberation Sans', 'DejaVu Sans')   # first one found is used
@@ -214,6 +216,9 @@ def lapse_rate_fill(gdf):
 def _read_hillshade(path, decimation):
     """Decimated hillshade (average resampling) with 0 = outside the ellipse masked; the mask
     comes from a nearest-neighbour read so averaging does not leave a dark rim."""
+    if not Path(path).exists():
+        raise FileNotFoundError(f"{path}: no hillshade basemap; build it with `pixi run hillshade` "
+                                "(pipeline/scripts/get_hillshade.py, no credentials)")
     with rasterio.open(path) as src:
         out_shape = (src.height // decimation, src.width // decimation)
         values = src.read(1, out_shape=out_shape, resampling=Resampling.average)
@@ -523,7 +528,7 @@ def _draw(kind, stats_gdf, version, style, fill_fn, show_col, anchor_cols, inset
     labels['anchor_y'] = labels[anchor_cols[1]]
     labels['_labelled'] = ((labels['display_map'] == 1) & (labels['display_label'] == 1)
                            & (labels[show_col] == 1) & labels['anchor_x'].notna())
-    inset_dir = paths.figdir('mountain_ranges', version, inset_sub, 'pngs')
+    inset_dir = paths.figdir('mountain_ranges', version, inset_sub)
 
     # page height: either the project's page (blocks that would poke above it are shifted
     # down) or resized so the highest label block sits top_margin_mm below the top edge (the

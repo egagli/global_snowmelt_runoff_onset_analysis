@@ -1,6 +1,9 @@
 """The aggregation engine: per-tile pixel tables -> per-tile PARTIAL SUMS
-(the fleet "map") -> merged per-unit-type cubes (the local "reduce"), plus
-the read-side helpers every analysis notebook uses on the resulting files.
+(the fleet "map", :func:`tile_partials`) -> merged per-unit-type cubes (the
+"reduce", :func:`reduce_partials`, run by the notebooks
+``analyses/<unit>/0_aggregate_by_<unit>.ipynb``), plus the read-side helpers
+every analysis notebook uses on the resulting files (:func:`weighted_mean`,
+:func:`collapse`, :func:`threshold`, :func:`elevation_relative`).
 
 Design (August 2026 redesign, replacing the parquet-scan stage 2):
 
@@ -34,7 +37,9 @@ Design (August 2026 redesign, replacing the parquet-scan stage 2):
 - ``water_years`` is always a parameter (``config.water_years``) — the
   dataset grows a year at a time, never hardcode it.
 - No cluster service, no dask: the map runs inside the fleet worker, the
-  reduce is pandas + numpy.
+  reduce is pandas + numpy in a notebook. Reading the partials, summing them
+  over tiles, naming the units and writing the cubes are visible cells of the
+  aggregation notebooks; this module holds only the math.
 
 Semantics that differ from the pre-2026 stage 2 (deliberate, checked
 2026-08-26 on the five v10 dry-run tiles): bins are half-open ``[left,
@@ -52,7 +57,6 @@ drops them.
 """
 
 import operator
-from collections import Counter
 
 import numpy as np
 import pandas as pd
@@ -148,7 +152,7 @@ BASIN_LEVEL_STORED = settings.BASIN_ATLAS_STORED_LEVEL   # 6
 # The cubes the REDUCE writes (``reduce_partials(..., group, ...)``): a unit
 # type, the bins kept (the others are summed out — exact, the sums are
 # additive) and, for basins, the HydroBASINS level (a digit-prefix of the
-# stored id). ``paths.aggregate(group, version, filter_tag)`` names the file.
+# stored id). The aggregation notebooks name the file ``all_<group>_<filter_tag>.nc``.
 GROUPS = {
     "mountain_ranges":   {"unit_type": "mountain_ranges", "bins": ("elevation", "aspect")},
     "river_basins":      {"unit_type": "river_basins", "bins": ("elevation",), "basin_level": 5},
@@ -567,165 +571,30 @@ def elevation_relative(da, dim="aspect"):
     return da - da.median(dim)
 
 
-def open_aggregate(group, version, filter_tag="fcf_lte_50", collapse_chili=False):
-    """Open ``aggregated_results/<version>/<group>/all_<group>_<filter>.nc``;
-    optionally collapse the CHILI axis (see :func:`collapse`)."""
-    from gsro_analysis import paths
-    ds = xr.open_dataset(paths.aggregate(group, version, filter_tag))
-    return collapse(ds) if collapse_chili else ds
-
-
 # ---------------------------------------------------------------------------
-# unit metadata (names, centroids, continents) for the mountain-range cube
+# the partials cache: the fleet product, downloaded once per tile
 
-def load_gmba(mask=None):
-    """The GMBA v2 standard 300 inventory (cached locally on first use)."""
-    import geopandas as gpd
-    return gpd.read_file(settings.cached_source(settings.GMBA_URL), mask=mask)
+def sync_partials(config, cache_dir, workers=16, log=print):
+    """Download the partials parquets of ``config.version`` that are missing from ``cache_dir``
+    (``paths.partials_cache(version)``) and delete cached files Azure no longer lists (a redone
+    tile). Re-runs only fetch new tiles. Needs the Azure SAS token. Returns the sorted local paths."""
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+    fs = config.azure_blob_fs
+    prefix = f"{settings.PARTIALS_PREFIX}/{config.version}"
+    remote = {p.rsplit('/', 1)[-1]: p for p in fs.ls(prefix, detail=False) if p.endswith('.parquet')}
+    local = {f for f in os.listdir(cache_dir) if f.endswith('.parquet')}
+    stale = local - set(remote)
+    for f in stale:
+        os.remove(cache_dir / f)
+    missing = sorted(set(remote) - local)
+    log(f"partials on Azure: {len(remote)} | cached: {len(local) - len(stale)} | "
+        f"downloading {len(missing)} | dropped stale {len(stale)}")
 
+    def fetch(name):
+        fs.get_file(remote[name], str(cache_dir / f"{name}.part"))
+        os.replace(cache_dir / f"{name}.part", cache_dir / name)
 
-def load_continents():
-    import geopandas as gpd
-    return gpd.read_file(settings.cached_source(settings.CONTINENTS_URL))
-
-
-def range_names(gmba_ids, gmba_gdf):
-    """GMBA_V2_ID -> display name: MapName, or Level_04 where a MapName is
-    shared by several polygons (the rule the analyses have always used)."""
-    id_to_name = dict(zip(gmba_gdf["GMBA_V2_ID"], gmba_gdf["MapName"]))
-    id_to_l4 = dict(zip(gmba_gdf["GMBA_V2_ID"], gmba_gdf["Level_04"]))
-    names = [id_to_name[i] for i in gmba_ids]
-    dup = {n for n, c in Counter(names).items() if c > 1}
-    return [id_to_l4[i] if n in dup else n for i, n in zip(gmba_ids, names)]
-
-
-def range_metadata(gmba_ids, gmba_gdf, continents_gdf):
-    """Per-range centroid (degrees, WGS84, computed in an equal-area CRS)
-    and continent (nearest polygon; Australia -> Oceania), indexed by
-    GMBA_V2_ID. Supersedes the pre-2026 helper whose 'latitude'/'longitude'
-    were EPSG:3857 metres."""
-    import geopandas as gpd
-    g = gmba_gdf.set_index("GMBA_V2_ID").loc[list(gmba_ids)]
-    cent = gpd.GeoSeries(g.geometry.to_crs("EPSG:6933").centroid, crs="EPSG:6933").to_crs("EPSG:4326")
-    pts = gpd.GeoDataFrame({"GMBA_V2_ID": list(gmba_ids)}, geometry=cent.values, crs="EPSG:4326")
-    joined = gpd.sjoin_nearest(pts, continents_gdf[["CONTINENT", "geometry"]], how="left")
-    joined = joined[~joined.index.duplicated()]
-    return pd.DataFrame({
-        "GMBA_V2_ID": list(gmba_ids),
-        "name": range_names(gmba_ids, gmba_gdf),
-        "centroid_latitude": cent.y.values, "centroid_longitude": cent.x.values,
-        "continent": joined["CONTINENT"].replace(CONTINENT_MERGE).values,
-    }).set_index("GMBA_V2_ID")
-
-
-def finalize_mountain_ranges(ds, gmba_gdf, continents_gdf, era5_zonal_ds=None):
-    """Name the ranges, attach centroid/continent coordinates and (if
-    given) the per-range ERA5 anomaly zonal means, all keyed by GMBA_V2_ID."""
-    ids = ds["mountain_range"].values.astype(int)
-    meta = range_metadata(ids, gmba_gdf, continents_gdf)
-    ds = ds.assign_coords(
-        GMBA_V2_ID=("mountain_range", ids),
-        centroid_latitude=("mountain_range", meta["centroid_latitude"].values),
-        centroid_longitude=("mountain_range", meta["centroid_longitude"].values),
-        continent=("mountain_range", meta["continent"].values.astype(str)),
-    ).assign_coords(mountain_range=meta["name"].values.astype(str)).sortby("mountain_range")
-    if era5_zonal_ds is not None:
-        # reindex, not sel: a range whose polygon the zonal join skipped (SKIP_RANGES, e.g. the
-        # South Atlantic Islands on 2026-09-04) still has pixels in the cube and gets NaN climate
-        z = era5_zonal_ds.reindex(GMBA_V2_ID=ds["GMBA_V2_ID"].values)
-        z = z.rename({"GMBA_V2_ID": "mountain_range"}).assign_coords(
-            mountain_range=ds["mountain_range"].values)
-        ds = xr.merge([ds, z.drop_vars([c for c in z.coords if c not in ("mountain_range", "water_year", "month")])],
-                      combine_attrs="drop_conflicts")
-    return ds
-
-
-def finalize_continents(ds, gtopo30_ds=None):
-    """Attach the GTOPO30 land-pixel histogram (``dem_pixel_count``) —
-    the background land area per latitude x elevation bin."""
-    if gtopo30_ds is not None:
-        ds["dem_pixel_count"] = gtopo30_ds["pixel_count"].reindex(
-            continent=ds["continent"], latitude=ds["latitude"], elevation=ds["elevation"]).astype("int64")
-        ds["dem_pixel_count"].attrs = gtopo30_ds["pixel_count"].attrs
-    return ds
-
-
-# GMBA polygons that need clipping before use in the ERA5 zonal join
-# (multipart/antimeridian or spurious extents), as (minx, miny, maxx, maxy);
-# plus ranges to skip entirely.
-RANGE_GEOMETRY_FIXES = {
-    "Aleutian Ranges": (-179.9, 0, -100, 90),
-    "Central Range": (120.9, -20, 155, 10),
-    "Arctic Ocean": (-179.9, 76, 179.9, 89.9),
-    "South Atlantic Islands": (-62, -55, -58, -48),
-}
-SKIP_RANGES = {"South Atlantic Islands"}  # tiny area, spurious data
-
-
-# ---------------------------------------------------------------------------
-# GTOPO30 latitude x elevation land histogram (Earth Engine) — the static
-# background for the continental panels; cached at paths.gtopo30_histogram()
-
-def gtopo30_lat_elev_histogram(continents_gdf, initialize_ee=True):
-    """Per-continent latitude(1 deg) x elevation(100 m) land-pixel-count
-    histogram from GTOPO30 via Earth Engine (1 km scale). The only EE
-    dependency in the aggregation stage, and grid/version independent —
-    build once, cache under data/. Auth: service-account key via
-    settings.initialize_earthengine (works headless)."""
-    import ee
-    if initialize_ee:
-        settings.initialize_earthengine()
-    dem = ee.Image("USGS/GTOPO30")
-
-    lat_coords = bin_centers("latitude")
-    dem_coords = bin_centers("elevation")
-    hist_data = np.zeros((len(CONTINENT_NAMES), len(lat_coords), len(dem_coords)),
-                         dtype=np.int64)
-
-    def one_continent(continent_name):
-        if continent_name == 'Oceania':
-            geom = continents_gdf[continents_gdf.CONTINENT.isin(['Oceania', 'Australia'])]
-        else:
-            geom = continents_gdf[continents_gdf.CONTINENT == continent_name]
-        if geom.empty:
-            return np.zeros((len(lat_coords), len(dem_coords)))
-        continent_ee = ee.FeatureCollection(geom.__geo_interface__)
-        lat_binned = ee.Image.pixelLonLat().select('latitude').add(90).floor().int()
-        dem_binned = dem.divide(100).floor().int()
-        binned = ee.Image.cat([ee.Image.constant(1), lat_binned, dem_binned]
-                              ).rename(['count', 'lat_bin', 'dem_bin'])
-        reducer = (ee.Reducer.sum()
-                   .group(groupField=1, groupName='lat_bin')
-                   .group(groupField=2, groupName='dem_bin'))
-        result = binned.reduceRegion(reducer=reducer,
-                                     geometry=continent_ee.geometry(),
-                                     scale=1000, maxPixels=1e12,
-                                     bestEffort=True).getInfo()
-        arr = np.zeros((len(lat_coords), len(dem_coords)))
-        for dem_group in result.get('groups', []):
-            if 'dem_bin' not in dem_group:
-                continue
-            dem_idx = int(dem_group['dem_bin'])
-            if dem_idx >= len(dem_coords):
-                continue
-            for lat_group in dem_group.get('groups', []):
-                if 'lat_bin' not in lat_group:
-                    continue
-                lat_idx = int(lat_group['lat_bin'])
-                if 0 <= lat_idx < len(lat_coords):
-                    arr[lat_idx, dem_idx] = lat_group.get('sum', 0)
-        return arr
-
-    for i, continent in enumerate(CONTINENT_NAMES):
-        print(f"GTOPO30 histogram: {continent}")
-        hist_data[i] = one_continent(continent)
-
-    ds = xr.Dataset(
-        data_vars={'pixel_count': (('continent', 'latitude', 'elevation'), hist_data)},
-        coords={'continent': CONTINENT_NAMES, 'latitude': lat_coords,
-                'elevation': dem_coords})
-    ds.latitude.attrs['units'] = 'degrees'
-    ds.elevation.attrs['units'] = 'meters'
-    ds.pixel_count.attrs['description'] = \
-        'Count of land pixels in each latitude-elevation bin (GTOPO30, 1 km scale)'
-    return ds
+    with ThreadPoolExecutor(workers) as ex:
+        list(ex.map(fetch, missing))
+    return sorted(cache_dir / f for f in remote)
