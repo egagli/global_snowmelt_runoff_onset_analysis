@@ -98,7 +98,7 @@ ci = { features = ["pipeline"] }
 [tasks]
 lab = "jupyter lab"
 setup-kernel = "python -m ipykernel install --user --name gsro-analysis --display-name 'gsro-analysis (pixi)'"
-# the local stages, in order (each idempotent; `pixi run reduce -- --mirror` copies the cubes to Azure)
+# the local stages, in order (each idempotent; `pixi run reduce --mirror` copies the cubes to Azure)
 era5-zonal = "python pipeline/scripts/era5_zonal.py"
 reduce = "python pipeline/scripts/reduce_partials.py"
 metrics = "python pipeline/scripts/range_metrics.py"

@@ -103,7 +103,9 @@ def fetch_chili(bbox_gdf):
 
     image = ee.Image(CHILI_ASSET)
     grid = get_ee_grid_params(image, bbox_gdf)
-    da = xr.open_dataset(ee.ImageCollection(image), engine='ee', **grid)['constant'].isel(time=0, drop=True)
+    # a static asset carries no system:time_start; stamp one so xee builds its (dropped) time axis quietly
+    collection = ee.ImageCollection([image.set('system:time_start', 0)])
+    da = xr.open_dataset(collection, engine='ee', **grid)['constant'].isel(time=0, drop=True)
     da = (da.astype(np.float32) / np.float32(255.0))                        # dims (y, x), rioxarray-native names
     da = da.rio.write_crs(grid['crs']).rio.write_nodata(np.nan)
     da.attrs = {'long_name': 'Continuous Heat-Insolation Load Index, asset value / 255',
@@ -514,7 +516,7 @@ def verify_and_mark_ancillary(config, row, col):
     try:
         fs = fresh_blob_fs(config)
         check = xr.open_zarr(fs.get_mapper(path), decode_coords='all',
-                             chunks=None)
+                             chunks=None, consolidated=False, zarr_format=3)
         missing = set(ANCILLARY_VARS) - set(check.data_vars)
         if missing:
             logger.warning(f"tile {row},{col}: store missing {sorted(missing)}")
@@ -577,7 +579,7 @@ def open_ancillary_tile(config, row, col):
     # fresh fs on purpose: in a long-lived worker the shared fs can list
     # empty after the heavy build steps (see fresh_blob_fs)
     ds = xr.open_zarr(fresh_blob_fs(config).get_mapper(ancillary_tile_path(config, row, col)),
-                      decode_coords='all', chunks=None)
+                      decode_coords='all', chunks=None, consolidated=False, zarr_format=3)
     missing = set(ANCILLARY_VARS) - set(ds.data_vars)
     if missing:
         raise ValueError(
@@ -613,7 +615,7 @@ def tabulate_tile(config, row, col, ancillary_ds, global_ds=None):
     # exact WGS84 pixel-center coordinates of the stored UTM grid
     ancillary_ds['original_lat'], ancillary_ds['original_lon'] = \
         _utm_latlon_arrays(ancillary_ds['dem'])
-    joined = xr.merge([onset_utm, ancillary_ds], join='exact',
+    joined = xr.merge([onset_utm, ancillary_ds], join='exact', compat='no_conflicts',
                       combine_attrs='drop_conflicts')
 
     water_years = [int(y) for y in config.water_years]

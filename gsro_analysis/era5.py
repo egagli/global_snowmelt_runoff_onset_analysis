@@ -175,6 +175,8 @@ def build_template(config):
                                          'Dec(wy-1)..Aug(wy), cells south of the equator Jun(wy)..Feb(wy+1)')}
     ds['water_year'].attrs = {'description': 'water year (NH Oct(wy-1)-Sep(wy); SH Apr(wy)-Mar(wy+1))'}
     ds = ds.rio.set_spatial_dims(x_dim='longitude', y_dim='latitude').rio.write_crs('EPSG:4326')
+    for v in VARIABLES:                     # an explicit attr: rioxarray keeps grid_mapping in encoding, which the
+        ds[v].attrs['grid_mapping'] = 'spatial_ref'   # zarr write drops, and decode_coords='all' needs it
     ds.attrs.update({
         'title': 'ERA5-Land monthly aggregates for the global snowmelt runoff onset analyses',
         'source': f'Google Earth Engine {EE_COLLECTION} through xee on the native grid (no resampling)',
@@ -387,8 +389,11 @@ def open_era5_land(config, repo=None, local_store=None, chunks='auto', group=Non
     """The acquisition (or, with ``group='anomaly'``, the anomaly) as a lazy Dataset on
     ``(water_year, month, latitude, longitude)``, north-down native grid, CF coords."""
     repo = repo or open_repo(config, local_store)
-    return xr.open_zarr(repo.readonly_session(BRANCH).store, group=group, zarr_format=3,
-                        consolidated=False, decode_coords='all', chunks=chunks)
+    ds = xr.open_zarr(repo.readonly_session(BRANCH).store, group=group, zarr_format=3,
+                      consolidated=False, decode_coords='all', chunks=chunks)
+    if 'spatial_ref' in ds.data_vars:      # stores written before grid_mapping was an explicit attr
+        ds = ds.set_coords('spatial_ref')
+    return ds
 
 
 def build_anomaly(config, repo=None, local_store=None, force=False, log=print):
@@ -570,7 +575,7 @@ def zonal_anomalies(config, units_gdf, id_col, unit_dim=None, variables=None,
     unit_dim = unit_dim or id_col
     if anomaly_ds is None:
         anomaly_ds = open_anomaly(config)
-    variables = list(variables or anomaly_ds.data_vars)
+    variables = list(variables or [v for v in anomaly_ds.data_vars if 'month' in anomaly_ds[v].dims])
     progress(f"coverage matrix for {len(units_gdf)} units ...")
     W, ids = unit_coverage_matrix(units_gdf, id_col, anomaly_ds, subcells=subcells,
                                   geometry_fixes=geometry_fixes, skip_names=skip_names)

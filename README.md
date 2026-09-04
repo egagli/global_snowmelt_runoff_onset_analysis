@@ -119,7 +119,7 @@ applies the analyses' rules in one call.
    only the water years without a commit, then builds the anomaly group; `start_fresh` deletes the store first).
 2. **Fleet**: dispatch `Pipeline Fleet` (`max_batches=1` first as a smoke test, then `0`); re-dispatch
    until the plan job reports 0 remaining. Failure = no output, so a failed tile is simply re-listed.
-3. **Local stages**: `pixi run era5-zonal`, `pixi run reduce` (add `-- --mirror` to copy the cubes to
+3. **Local stages**: `pixi run era5-zonal`, `pixi run reduce` (add `--mirror` to copy the cubes to
    Azure), `pixi run metrics`.
 4. **Notebooks**: see [analyses/README.md](analyses/README.md); the two composite world maps build their
    own inset sweeps.
