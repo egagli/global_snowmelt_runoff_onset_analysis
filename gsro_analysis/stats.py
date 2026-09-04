@@ -150,7 +150,16 @@ def spring_temperature_sensitivity(mountains_ds, var="temperature_2m",
     spring anomaly of ``var`` (default 2 m temperature): OLS slope
     (days per unit), Pearson r, p-value, n, plus the Theil-Sen slope and
     its 95 % bounds. Years with < ``min_year_fraction`` of the range's
-    pixels valid are excluded (the analyses' rule)."""
+    pixels valid are excluded (the analyses' rule).
+
+    Note (2026-09-04): n is at most the number of water years (11 for v10), so
+    the OLS slope and its p-value lean on a handful of points and one outlier
+    year moves them a lot. The Theil-Sen slope computed alongside is the robust
+    alternative already in hand; when these numbers are quoted, consider making
+    it (or a bootstrap interval of the OLS slope, a Huber/RANSAC fit, or a
+    Spearman correlation) the headline instead of the OLS fit. The same applies
+    to every place that regresses per-year means on per-year climate anomalies
+    (the case-study scatter, the per-range scatter sweep)."""
     anom = range_mean_anomaly(mountains_ds, min_year_fraction=min_year_fraction)
     clim = mountains_ds[var].sel(month=list(months)).mean("month")
     rows = []

@@ -66,9 +66,9 @@ flowchart LR
     gt["data/gtopo30_lat_elev_histogram.nc"]:::src
     lay["label_layout.csv"]:::src
   end
-  subgraph F["GitHub Actions fleet · per tile"]
-    a0["stage 0: ancillary zarr per GRID<br/>compact ints, 8 MB, verified marker<br/>basins at HydroBASINS level 6"]:::mid
-    a1["stage 1: tabulate in memory"]:::mid
+  subgraph F["GitHub Actions waves · per tile"]
+    a0["Get ancillary data: one icechunk repo per GRID<br/>8 layers on the dataset grid, compact ints<br/>one commit per tile"]:::mid
+    a1["Process tiles to parquets: both windows -> 80 m UTM<br/>slope + aspect from the UTM DEM, tabulate in memory"]:::mid
     m["map: tile_partials<br/>filter x unit x bins x CHILI class<br/>n, Σx, Σx², Σxy · 83 columns"]:::mid
   end
   subgraph L["Local · minutes"]
@@ -141,7 +141,7 @@ method to 0.01–0.06 K mean absolute difference.
 | Snow class, WorldCover, forest cover | as before (FCF mirror on uwcryo) | ancillary layers; pixel columns | named predicate sets `aggregate.FILTERS` applied in the map, both tags (`fcf_lte_50`, `full_dataset`) emitted in the same pass; FCF correlation only over pixels with FCF coverage | one cube per (unit type, filter tag), filter recorded in filename and attrs; `fcf_corr`, `fcf_corr_n` | notebooks open `fcf_lte_50` (the analyses' rule) explicitly |
 | Unit membership | GMBA v2, BasinATLAS **lev06** (since 2026-09-03; lev05 before), USGS continents, downloaded once into `data/geometries/sources/` | integer id layers in the ancillary (`GMBA_V2_ID` int32, `PFAF_ID` int32 six-digit, `continent` int8), rasterized with `geocube` at 0.0003° and mode-resampled onto the 80 m grid; `datacube.refresh_unit_layers` rewrites them in place | part of the map key; the reduce derives the level-5 basin id (`PFAF_ID // 10`) for the default `river_basins` cube, names ranges (`MapName` / `Level_04`), adds centroids and continent, names continents (Australia → Oceania) on a fixed six-continent axis so partial versions still run | `mountain_range`, `river_basin`, `continent` dimensions | range names; display-range lists filtered to what exists |
 | Marginals | the cubes themselves | — | not stored: `weighted_mean(ds, var, dims)` (count-weighted, exact), `collapse`, `threshold`, `elevation_relative` at read time | — | basin means for the choropleths, range mean anomalies, elevation profiles |
-| ERA5-Land anomalies | ERA5-Land monthly via Earth Engine (`ERA5 Acquire` workflow, one job per water year, `ee.data.computePixels` on the native 0.1° grid) | one icechunk repository `era5_land/<version>/era5_land`: the 8 variables on `(water_year, month, latitude, longitude)`, one commit per water year, plus the `anomaly` group (minus the per-pixel median over all water years; base period in attrs and commit metadata); the commit history is the ledger; Equal-Earth products derived on the fly | `era5.zonal_anomalies`: a sparse coverage matrix (polygon fraction per 0.1° cell, 5 × 5 subcells) times per-year cell weights (seasonal-snow fraction × onset validity from the public pyramid) → weighted zonal mean per unit, variable, water year and month, for all units in one streamed pass (~4 min for 289 ranges, ~3.5 min for the 16,341 level-6 basins); cells under 0.25 total weight → NaN | `aggregated_results/<v>/era5_zonal/era5_anomaly_<unit_type>.nc` on `(unit, water_year, month)` plus `zonal_weight`; merged into the range and basin cubes by the reduce; `stats.seasonal_means` adds `spring_months_mean` etc. on read | `range_metrics.py` (OLS + Theil–Sen sensitivity per range → the metrics table); `temperature_sensitivity.ipynb`; the per-range scatter sweep of the temperature-sensitivity world map |
+| ERA5-Land anomalies | ERA5-Land monthly via Earth Engine (`Get ERA5-Land data` workflow, one job per water year, `ee.data.computePixels` on the native 0.1° grid) | one icechunk repository `era5_land/<version>/era5_land`: the 8 variables on `(water_year, month, latitude, longitude)`, one commit per water year, plus the `anomaly` group (minus the per-pixel median over all water years; base period in attrs and commit metadata); the commit history is the ledger; Equal-Earth products derived on the fly | `era5.zonal_anomalies`: a sparse coverage matrix (polygon fraction per 0.1° cell, 5 × 5 subcells) times per-year cell weights (seasonal-snow fraction × onset validity from the public pyramid) → weighted zonal mean per unit, variable, water year and month, for all units in one streamed pass (~4 min for 289 ranges, ~3.5 min for the 16,341 level-6 basins); cells under 0.25 total weight → NaN | `aggregated_results/<v>/era5_zonal/era5_anomaly_<unit_type>.nc` on `(unit, water_year, month)` plus `zonal_weight`; merged into the range and basin cubes by the reduce; `stats.seasonal_means` adds `spring_months_mean` etc. on read | `range_metrics.py` (OLS + Theil–Sen sensitivity per range → the metrics table); `temperature_sensitivity.ipynb`; the per-range scatter sweep of the temperature-sensitivity world map |
 | Land area reference | GTOPO30 histogram, seeded from the v9 file and tracked as `data/gtopo30_lat_elev_histogram.nc` (40 KB); `reduce_partials.py --build-gtopo30` regenerates it via Earth Engine | — | merged by the reduce | `dem_pixel_count` in the continents cube | `global/lat_elev_binning` |
 | Curated label layout | `analyses/mountain_ranges/label_layout.csv` (45 rows: display flags, per-map anchors in Robinson metres) | — | joined on read by `world_maps.prepare` to the metrics table + GMBA polygons (`stats.range_metrics_gdf`) | which 40 / 30 ranges get an inset and where | the two composite-figure notebooks |
 
@@ -251,7 +251,7 @@ If the campaign has already run when this is decided, the fallback is the "stage
 fleet pass described above; the ancillary layers other than the ids are untouched and no Earth
 Engine work recurs.
 
-## Design note: the ancillary as one icechunk repository on the dataset grid (raised 2026-09-03; not pursued for now)
+## Design note: the ancillary as one icechunk repository on the dataset grid (raised 2026-09-03; storage adopted 2026-09-04, tabulation stays UTM)
 
 Considered and deferred: replacing the per-tile UTM ancillary zarrs with ONE icechunk repository on the
 dataset's own geographic grid (EPSG:4326, 0.00072°, 204,800 × 499,998 pixels, one shard per 2048 × 2048 tile
@@ -269,8 +269,16 @@ them back by bilinear and sin/cos resampling; far-north tiles carry about twice 
 of, e.g., 2057 × 1060 for tile 016_152), so the tabulate would peak nearer 6–8 GB and the ancillary would
 grow from ~35 GB to ~65–85 GB; and stages 0–1 would be rewritten and re-validated (about a day).
 
-Decision (2026-09-03): keep the per-tile UTM ancillary for the v10 campaign; revisit if the onset
-resampling or the area weighting ever matters for an analysis. A related provenance fact from the same
+Decision (2026-09-03, revised 2026-09-04): the STORAGE moves to one icechunk repository on the
+dataset grid (wave "Get ancillary data": the eight source layers resampled onto each tile's window
+of the dataset grid, one chunk per tile per layer, one commit per tile as the ledger), but the
+TABULATION stays on the tile's 80 m UTM grid (wave "Process tiles to parquets": the dataset window
+and the ancillary window, which share pixel indices, are both reprojected onto the UTM template,
+slope and aspect are derived there from the UTM DEM, and the pixel table is built as before). Every
+row is therefore still a ~6,400 m² pixel and counts stay area, so no area weight is needed; the
+price is that the continuous layers (DEM, CHILI, forest cover) are resampled twice. The onset is
+still resampled once, as before.
+A related provenance fact from the same
 day: two builds of tile 016_152 with different environments (the 2026-08-24 lock with GDAL 3.12.3 /
 rasterio 1.5.0 / odc-stac 0.5.2 / PROJ 9.7.1 versus the current 3.13.2 / 1.5.1 / 0.5.3 / 9.8.1) differ in
 11 % of DEM cells by more than 1 m with zero mean bias, while two builds in one environment are identical
@@ -350,3 +358,15 @@ aspect control changes with latitude (south − north offset per latitude band a
 continents-with-aspect cube); the aspect of fastest melt and the aspect with the greatest difference,
 per latitude band or per range; and how these vary by water year (per-year aspect control, see the
 table above).
+
+## Analysis note: regressions on eleven water years (2026-09-04)
+
+Every temperature-sensitivity number (the per-range slopes in `mountain_range_metrics.csv`, the
+case-study scatter, the per-range scatter sweep behind the world map) regresses a per-year mean onset
+anomaly on a per-year climate anomaly with n ≤ 11 points. An OLS slope and its p-value rest on a
+handful of points and a single outlier year moves them a lot. `stats.spring_temperature_sensitivity`
+already computes the Theil–Sen slope with its 95 % bounds alongside OLS; when these numbers are
+quoted, consider making the robust estimate the headline (Theil–Sen, or a bootstrap interval of the
+OLS slope, a Huber/RANSAC fit, a Spearman correlation), and consider pooling ranges hierarchically if
+a global sensitivity is wanted. Nothing in the pipeline changes for this; it is a choice made where
+the numbers are read.

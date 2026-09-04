@@ -1,0 +1,85 @@
+"""'Process tiles to parquets' worker: for a batch of tiles, read the tile's window of the
+dataset store and of the ancillary store, reproject both onto the tile's 80 m UTM grid, tabulate
+the pixels and write the tile's PARTIAL SUMS parquet (datacube.process_tile); with --keep-pixels
+also the per-pixel parquet. One matrix job runs one batch; equally runnable locally.
+
+Tiles whose partials blob exists are skipped. A tile without an ancillary commit fails (run 'Get
+ancillary data' first). Failure = exception = no output: the tile is re-listed by the next
+dispatch. The job exits nonzero if any tile failed, but one bad tile never blocks its batchmates.
+
+Needs only the Azure SAS token (no Earth Engine: every external source is already in the
+ancillary store).
+"""
+
+import argparse
+import json
+import sys
+import time
+import traceback
+
+from gsro_analysis import datacube, settings
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--config', default=settings.CONFIG_FILE)
+    p.add_argument('--manifest', help='manifest json from get_remaining_work.py --stage partials')
+    p.add_argument('--batch', type=int, help='batch index into the manifest')
+    p.add_argument('--tile', nargs=2, type=int, action='append', metavar=('ROW', 'COL'))
+    p.add_argument('--tile-list', help='file with one "row col" pair per line')
+    p.add_argument('--keep-pixels', action='store_true',
+                   help='also write the per-pixel parquet (opt-in product; ~35 MB/tile, ~150 GB for the grid)')
+    return p.parse_args()
+
+
+def load_tiles(args):
+    tiles = [tuple(t) for t in (args.tile or [])]
+    if args.tile_list:
+        with open(args.tile_list) as f:
+            tiles += [tuple(map(int, line.split())) for line in f if line.strip() and not line.startswith('#')]
+    if args.manifest is not None:
+        if args.batch is None:
+            sys.exit('--manifest requires --batch')
+        with open(args.manifest) as f:
+            manifest = json.load(f)
+        tiles += [tuple(t) for t in manifest['batches'][args.batch]]
+    if not tiles:
+        sys.exit('no tiles given (--manifest/--batch, --tile, or --tile-list)')
+    return tiles
+
+
+def main():
+    args = parse_args()
+    tiles = load_tiles(args)
+    config = settings.load_config(args.config)
+    fs = config.azure_blob_fs
+    log = lambda m: print(f"    {m}", flush=True)  # noqa: E731
+
+    repo = datacube.open_ancillary_repo(config)
+    global_ds = config.open_runoff_onset_dataset(chunks=None, mask_and_scale=True)
+    failed = []
+    for i, (row, col) in enumerate(tiles):
+        t0 = time.time()
+        try:
+            if fs.exists(datacube.partials_tile_path(config, row, col)) and (
+                    not args.keep_pixels or fs.exists(datacube.parquet_tile_path(config, row, col))):
+                print(f"[{i+1}/{len(tiles)}] tile {row},{col}: partials exist, skip", flush=True)
+                continue
+            print(f"[{i+1}/{len(tiles)}] tile {row},{col}: start", flush=True)
+            n_px, n_rows = datacube.process_tile(config, row, col, global_ds=global_ds,
+                                                 keep_pixels=args.keep_pixels, log=log, repo=repo)
+            print(f"[{i+1}/{len(tiles)}] tile {row},{col}: done, {n_px:,} px -> {n_rows:,} partial rows "
+                  f"({time.time() - t0:.0f}s)", flush=True)
+        except Exception:
+            print(f"[{i+1}/{len(tiles)}] tile {row},{col}: FAILED after {time.time() - t0:.0f}s", flush=True)
+            traceback.print_exc()
+            failed.append((row, col))
+
+    print(f"batch done: {len(tiles) - len(failed)} ok, {len(failed)} failed", flush=True)
+    if failed:
+        sys.exit(f"failed tiles: {failed}")
+
+
+if __name__ == '__main__':
+    main()

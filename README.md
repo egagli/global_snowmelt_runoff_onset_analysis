@@ -30,7 +30,7 @@ Credentials, all resolved automatically:
 
 | Credential | Needed for | Source |
 | --- | --- | --- |
-| Azure SAS token | the dataset store and every Azure product (ancillary, partials, the ERA5-Land repo, mirrored cubes) | `../global_snowmelt_runoff_onset/config/sas_token.txt` or `AZURE_STORAGE_SAS_TOKEN` |
+| Azure SAS token | the dataset store and every Azure product (the ancillary and ERA5-Land repos, partials, mirrored cubes) | `../global_snowmelt_runoff_onset/config/sas_token.txt` or `AZURE_STORAGE_SAS_TOKEN` |
 | Earth Engine service key | CHILI (ancillary build), ERA5-Land acquisition, the GTOPO30 histogram rebuild, `river_basins/snow_water` | `../global_snowmelt_runoff_onset/config/ee_key.json`, via `settings.initialize_earthengine()` (works headless) |
 | none | the public multiscale pyramid, every notebook that reads only the local cubes and tables, the Evan & Eisenman comparison | — |
 
@@ -40,7 +40,7 @@ Compute is local or GitHub Actions; there is no cluster service.
 
 ```text
 gsro_analysis/        the package (table below)
-pipeline/             scripts/ (fleet worker, dispatcher, ERA5-Land store, zonal join, reduce, metrics),
+pipeline/             scripts/ (the two wave workers, the dispatcher, the ERA5-Land store, zonal join, reduce, metrics),
                       pipeline.ipynb (state, reset, work list + dispatch, one tile end to end, local
                       stages), tile_data/ (the fleet work list); README.md = mechanics
 analyses/<unit>/      one folder per aggregation unit (global = continents cube, mountain_ranges,
@@ -52,9 +52,9 @@ aggregated_results/   pipeline outputs, version-first — gitignored, mirrored t
   <version>/<group>/all_<group>_<filter>.nc    the cubes (mountain_ranges, river_basins, continents;
                                                river_basins_l6 and continents_aspect on demand)
   <version>/era5_zonal/                        per-unit ERA5-Land anomaly zonal means
-  <version>/partials/                          local cache of the fleet's per-tile partial sums
+  <version>/partials/                          local cache of the per-tile partial sums
 tests/                fixture partials for the credential-free CI smoke test
-.github/workflows/    pipeline_fleet.yml, era5_acquire.yml (workflow_dispatch), ci.yml
+.github/workflows/    get_era5_land_data.yml, get_ancillary_data.yml, process_tiles.yml (workflow_dispatch), ci.yml
 ```
 
 **Version discipline.** Every output path names the dataset version it came from (`config.version`,
@@ -67,33 +67,42 @@ and `GSRO_OUTPUT_ROOT` redirect the cubes and the figures/results to a test set.
 
 ## Pipeline
 
-```text
- GitHub Actions fleet (per tile, ~2.5 min; pipeline_fleet.yml -> scripts/run_fleet_batch.py)
-   stage 0  ancillary raster     Cop-DEM, CHILI (EE), snow class, WorldCover, FCF, GMBA / HydroBASINS level-6 /
-                                 continent ids -> Azure snowmelt_runoff_onset_analysis/ancillary/<grid>/tile_RRR_CCC.zarr (once per GRID)
-   stage 1  tabulate (in memory) store tile window -> reproject_match onto the ancillary -> pixel table
-            map                  -> PARTIAL SUMS per (filter, unit, bins, CHILI class)
-                                 -> Azure snowmelt_runoff_onset_analysis/partials/<version>/tile_RRR_CCC.parquet (~0.1-1 MB/tile)
-            [--keep-pixels]      -> Azure snowmelt_runoff_onset_analysis/parquets/<version>/tile_RRR_CCC.parquet (opt-in pixel table)
+Three waves of GitHub Actions workflows, dispatched by hand in this order and each re-dispatched
+until its plan job reports nothing remaining, then the local stages:
 
- ERA5 Acquire workflow (era5_acquire.yml -> scripts/era5_land.py; one job per water year)
-            ERA5-Land monthly (EE, native 0.1 deg grid) -> Azure snowmelt_runoff_onset_analysis/era5_land/<version>/era5_land
-                                 (ONE icechunk repo: one commit per water year + the anomaly group; the commit history is the ledger)
+```text
+ 1  Get ERA5-Land data      (get_era5_land_data.yml -> scripts/era5_land.py; one job per water year)
+      ERA5-Land monthly (Earth Engine via xee, native 0.1 deg grid) -> ONE icechunk repo per version
+      snowmelt_runoff_onset_analysis/era5_land/<version>/era5_land: one commit per water year + the anomaly group
+
+ 2  Get ancillary data      (get_ancillary_data.yml -> scripts/build_ancillary_batch.py; ~2.5 min per tile)
+      Cop-DEM, CHILI (Earth Engine), snow class, WorldCover, forest cover, GMBA / HydroBASINS level-6 /
+      continent ids -> the tile's window of the DATASET grid (EPSG:4326, 0.00072 deg) -> ONE icechunk repo per grid
+      snowmelt_runoff_onset_analysis/ancillary/<version>_grid/ancillary: compact ints, one chunk and one commit per tile
+
+ 3  Process tiles to parquets (process_tiles.yml -> scripts/process_tiles_batch.py; ~1 min per tile, no Earth Engine)
+      store window + ancillary window (same pixel indices) -> the tile's 80 m UTM grid (onset/DEM/CHILI/forest cover
+      bilinear, categorical and id layers nearest) -> slope + aspect from the UTM DEM -> pixel table (in memory)
+      -> PARTIAL SUMS per (filter, unit, bins, CHILI class) -> snowmelt_runoff_onset_analysis/partials/<version>/tile_RRR_CCC.parquet
+      [keep_pixels] -> the per-pixel parquet (opt-in)
 
  local (minutes each; pixi run era5-zonal / reduce / metrics)
-   stage 2  scripts/era5_zonal.py       anomaly store x (GMBA, HydroBASINS) polygons -> era5_zonal/*.nc
-            scripts/reduce_partials.py  partials -> the cubes (+ ERA5 zonal means, GTOPO30, names)
-   stage 3  scripts/range_metrics.py    mountain-range cube -> results/<version>/mountain_range_metrics.csv
-   analyses/<unit>/*.ipynb              notebooks -> figures/<version>/
+   scripts/era5_zonal.py       anomaly group x (GMBA, HydroBASINS) polygons -> era5_zonal/*.nc
+   scripts/reduce_partials.py  partials -> the cubes (+ ERA5 zonal means, GTOPO30, names)
+   scripts/range_metrics.py    mountain-range cube -> results/<version>/mountain_range_metrics.csv
+   analyses/<unit>/*.ipynb     notebooks -> figures/<version>/
 ```
 
-Every statistic the analyses read is reducible (means, standard deviations and correlations from
-sums), so a fleet job emits sums instead of a pixel table and the reduce is a laptop job. The map keys
-every unit type by the finest axes it will ever need (basins at HydroBASINS level 6, continents by
-latitude x elevation x aspect); the reduce derives the coarser default cubes (level-5 basins, latitude
-x elevation continents) exactly, and the finer ones on demand. Mechanics — ledgers, what a partials row
-is, filters, fleet sizing, redo recipes: [pipeline/README.md](pipeline/README.md). Lineage of every
-input from source to analysis: [docs/aggregation_lineage.md](docs/aggregation_lineage.md).
+The two stores are ledgers: a tile or a water year is done when it has a commit, a failed job commits
+nothing, and each plan job folds the commit history to list what remains (the production repo's
+icechunk fleet pattern). Every statistic the analyses read is reducible (means, standard deviations and
+correlations from sums), so a tile job emits sums instead of a pixel table and the reduce is a laptop
+job. The map keys every unit type by the finest axes it will ever need (basins at HydroBASINS level 6,
+continents by latitude x elevation x aspect); the reduce derives the coarser default cubes (level-5
+basins, latitude x elevation continents) exactly, and the finer ones on demand. Tabulating on the UTM
+grid keeps every row a ~6,400 m² pixel, so pixel counts are area without weights. Mechanics, ledgers,
+what a partials row is, sizing, redo recipes: [pipeline/README.md](pipeline/README.md). Lineage of
+every input from source to analysis: [docs/aggregation_lineage.md](docs/aggregation_lineage.md).
 
 ### The aggregate schema
 
@@ -115,19 +124,22 @@ applies the analyses' rules in one call.
 
 ## Running a dataset version
 
-1. **ERA5-Land**: dispatch `ERA5 Acquire` (no inputs needed: it creates the version's store if missing, fetches
-   only the water years without a commit, then builds the anomaly group; `start_fresh` deletes the store first).
-2. **Fleet**: dispatch `Pipeline Fleet` (`max_batches=1` first as a smoke test, then `0`); re-dispatch
-   until the plan job reports 0 remaining. Failure = no output, so a failed tile is simply re-listed.
-3. **Local stages**: `pixi run era5-zonal`, `pixi run reduce` (add `--mirror` to copy the cubes to
+1. **Get ERA5-Land data**: no inputs needed; it creates the version's store if missing, fetches only the
+   water years without a commit, then builds the anomaly group (`start_fresh` deletes the store first).
+2. **Get ancillary data**: creates the grid generation's ancillary store if missing and builds every tile
+   without a commit (`start_fresh` deletes the store first). Re-dispatch until the plan job reports 0.
+3. **Process tiles to parquets**: maps every tile that has an ancillary commit and no partials blob
+   (`start_fresh` deletes the partials and pixel tables first). Re-dispatch until 0 remaining. Each job
+   logs one line per step per tile.
+4. **Local stages**: `pixi run era5-zonal`, `pixi run reduce` (add `-- --mirror` to copy the cubes to
    Azure), `pixi run metrics`.
-4. **Notebooks**: see [analyses/README.md](analyses/README.md); the two composite world maps build their
+5. **Notebooks**: see [analyses/README.md](analyses/README.md); the two composite world maps build their
    own inset sweeps.
 
 `pipeline/pipeline.ipynb` has a cell for each step (state, reset, work list, dispatch, one tile end to
-end, local stages). To redo a tile, delete its partials blob (for a grid change also the ancillary zarr
-and its marker) and re-dispatch; stages 2 and 3 overwrite. A change of a unit definition alone is
-`datacube.refresh_unit_layers` plus a re-map, no Earth Engine.
+end, local stages). To redo a tile, delete its partials blob and re-dispatch wave 3; recommitting a tile
+in wave 2 supersedes its ancillary. A change of a unit definition alone is
+`datacube.refresh_unit_layers` (one commit per tile, no Earth Engine) plus a re-map.
 
 ## The `gsro_analysis` package
 
@@ -135,7 +147,8 @@ and its marker) and re-dispatch; stages 2 and 3 overwrite. A change of a unit de
 | --- | --- |
 | [paths.py](gsro_analysis/paths.py) | version-aware, repo-root-anchored paths: `figdir`, `resultsdir`, `aggregate`, `era5_zonal`, `partials_cache`, `gtopo30_histogram`; the two environment overrides |
 | [settings.py](gsro_analysis/settings.py) | the one place the dataset version is chosen; Azure prefixes; external source URLs (GMBA, BasinATLAS, continents, forest cover, snow class); Earth Engine init; `cached_source` |
-| [datacube.py](gsro_analysis/datacube.py) | per-tile UTM ancillary construction and compact save, `refresh_unit_layers`, tabulation, `process_tile` (the fleet job), partials/pixel-table writers, ledgers, `reset_version` (dry run by default) |
+| [ledger.py](gsro_analysis/ledger.py) | the icechunk ledger shared by the two stores: storage handles, `commit_with_retry`, the ancestry fold `commit_records` |
+| [datacube.py](gsro_analysis/datacube.py) | the ancillary store on the dataset grid (`initialize_ancillary_store`, `build_ancillary_window`, `write_ancillary_tile`, `open_ancillary_window`, `refresh_unit_layers`), the UTM process step (`tabulate_tile`, `process_tile`), partials/pixel-table writers, `reset_version` (dry run by default) |
 | [aggregate.py](gsro_analysis/aggregate.py) | `FILTERS`, `UNIT_TYPES`, `GROUPS`; the map `tile_partials` and the reduce `reduce_partials`; `open_aggregate`, `weighted_mean`, `collapse`, `threshold`, `elevation_relative`; range names and metadata; the GTOPO30 histogram |
 | [era5.py](gsro_analysis/era5.py) | the ERA5-Land icechunk store: template, native-grid acquisition (`acquire_water_year`), commit ledger (`status`), `build_anomaly`, `open_era5_land`, `open_anomaly`, the zonal join `zonal_anomalies`, Equal Earth on the fly, `pixelwise_correlations` |
 | [stats.py](gsro_analysis/stats.py) | `prepare_mountain_ranges`, `basin_summary`, two lapse-rate definitions, `spring_temperature_sensitivity`, `climate_regressions`, `range_metrics_gdf` |

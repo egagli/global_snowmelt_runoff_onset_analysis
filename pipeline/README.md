@@ -1,20 +1,22 @@
 # pipeline
 
-Map/reduce over tiles. The engine lives in [`gsro_analysis/datacube.py`](../gsro_analysis/datacube.py)
-(stage 0/1: ancillary, tabulate, `process_tile`) and [`gsro_analysis/aggregate.py`](../gsro_analysis/aggregate.py)
-(the map `tile_partials`, the reduce `reduce_partials`); `scripts/` are the batch entry points;
-`pipeline.ipynb` is the operator's notebook (state, reset, work list and dispatch, one tile end to end,
-local stages). Lineage of every input from source to analysis, and the design notes behind the unit
-levels and the CHILI axis: [docs/aggregation_lineage.md](../docs/aggregation_lineage.md).
+Three waves of GitHub Actions workflows over the tiles, then local stages. The engine lives in
+[`gsro_analysis/datacube.py`](../gsro_analysis/datacube.py) (the ancillary store and the process step),
+[`gsro_analysis/era5.py`](../gsro_analysis/era5.py) (the ERA5-Land store),
+[`gsro_analysis/ledger.py`](../gsro_analysis/ledger.py) (the shared icechunk ledger) and
+[`gsro_analysis/aggregate.py`](../gsro_analysis/aggregate.py) (the map `tile_partials`, the reduce
+`reduce_partials`); `scripts/` are the entry points; `pipeline.ipynb` is the operator's notebook (state,
+reset, work list and dispatch, one tile end to end, local stages). Lineage of every input from source to
+analysis, and the design notes: [docs/aggregation_lineage.md](../docs/aggregation_lineage.md).
 
-| Stage | Where | Entry point | Reads | Writes |
+| Wave / stage | Where | Entry point | Reads | Writes |
 | --- | --- | --- | --- | --- |
-| 0 ancillary (once per **grid**) | fleet job | `scripts/run_fleet_batch.py` | Cop-DEM, CHILI (EE), snow class, WorldCover, FCF, GMBA, BasinATLAS level 6, continents | `snowmelt/snowmelt_runoff_onset_analysis/ancillary/<version>_grid/tile_RRR_CCC.zarr` (compact int encodings, ~8 MB) + `_complete/tile_RRR_CCC.json` |
-| 1 tabulate + map (per dataset **version**) | same fleet job | `scripts/run_fleet_batch.py` → `datacube.process_tile` | icechunk store tile window + the ancillary zarr | `snowmelt/snowmelt_runoff_onset_analysis/partials/<version>/tile_RRR_CCC.parquet` — partial sums for both filter tags × three unit types (~0.1–1 MB). `--keep-pixels`: also the pixel table `snowmelt/snowmelt_runoff_onset_analysis/parquets/<version>/tile_RRR_CCC.parquet` (~35 MB) |
-| ERA5 | `ERA5 Acquire` workflow (one job per water year) | `scripts/era5_land.py` | ERA5-Land monthly (EE, `ee.data.computePixels` on the native 0.1° grid) | `snowmelt/snowmelt_runoff_onset_analysis/era5_land/<version>/era5_land` — ONE icechunk repository: the 8 variables on `(water_year, month, latitude, longitude)`, one commit per water year, plus the `anomaly` group (one commit); the commit history is the ledger |
-| 2 ERA5 zonal | local | `scripts/era5_zonal.py` | anomaly store, GMBA + BasinATLAS polygons (level 5; `--units river_basins_l6` for level 6), pyramid masks | `aggregated_results/<version>/era5_zonal/era5_anomaly_<unit_type>.nc` |
-| 2 reduce | local | `scripts/reduce_partials.py` | the partials (auto-cached locally), GMBA/continents, `data/gtopo30_lat_elev_histogram.nc`, the zonal files | `aggregated_results/<version>/<group>/all_<group>_<filter>.nc` (`--groups` adds `river_basins_l6`, `continents_aspect`; `--mirror` → `snowmelt/snowmelt_runoff_onset_analysis/aggregated/<version>/`) |
-| 3 metrics | local | `scripts/range_metrics.py` | the mountain-range cube | `analyses/mountain_ranges/results/<version>/mountain_range_metrics.csv` |
+| 1 Get ERA5-Land data (per **version**) | workflow, one job per water year | `scripts/era5_land.py` | ERA5-Land monthly (Earth Engine via xee, native 0.1° grid) | `snowmelt/snowmelt_runoff_onset_analysis/era5_land/<version>/era5_land`: ONE icechunk repo, the 8 variables on `(water_year, month, latitude, longitude)`, one commit per water year, plus the `anomaly` group (one commit) |
+| 2 Get ancillary data (once per **grid**) | workflow, ~2.5 min per tile | `scripts/build_ancillary_batch.py` → `datacube.build_ancillary_window` | Cop-DEM, CHILI (EE), snow class, WorldCover, forest cover, GMBA, BasinATLAS level 6, continents | `snowmelt/snowmelt_runoff_onset_analysis/ancillary/<version>_grid/ancillary`: ONE icechunk repo on the dataset grid (EPSG:4326, 0.00072°), 8 layers with compact int encodings, one chunk and one commit per tile |
+| 3 Process tiles to parquets (per **version**) | workflow, ~1 min per tile, no EE | `scripts/process_tiles_batch.py` → `datacube.process_tile` | the dataset store's tile window + the ancillary store's tile window | both reprojected onto the tile's 80 m UTM grid, slope + aspect derived, pixel table in memory → `snowmelt/snowmelt_runoff_onset_analysis/partials/<version>/tile_RRR_CCC.parquet` (partial sums for both filter tags × three unit types, ~0.1–1 MB); `keep_pixels`: also the pixel table `…/parquets/<version>/tile_RRR_CCC.parquet` (~35 MB) |
+| 4 ERA5 zonal | local | `scripts/era5_zonal.py` | anomaly group, GMBA + BasinATLAS polygons (level 5; `--units river_basins_l6` for level 6), pyramid masks | `aggregated_results/<version>/era5_zonal/era5_anomaly_<unit_type>.nc` |
+| 4 reduce | local | `scripts/reduce_partials.py` | the partials (auto-cached locally), GMBA/continents, `data/gtopo30_lat_elev_histogram.nc`, the zonal files | `aggregated_results/<version>/<group>/all_<group>_<filter>.nc` (`--groups` adds `river_basins_l6`, `continents_aspect`; `--mirror` → `snowmelt/snowmelt_runoff_onset_analysis/aggregated/<version>/`) |
+| 5 metrics | local | `scripts/range_metrics.py` | the mountain-range cube | `analyses/mountain_ranges/results/<version>/mountain_range_metrics.csv` |
 
 ## What a "partials" row is
 
@@ -56,43 +58,49 @@ free `groupby` at reduce time while a finer one is a fleet re-map:
   ∉ {50, 80} + 0 ≤ fcf ≤ 50 (the ≥ 0 bound also drops nodata); `full_dataset` = the first two only.
 
 Changing a unit definition after the ancillary exists is `datacube.refresh_unit_layers(config, row,
-col)` (stage 0b: re-rasterizes the id layers of a stored tile in place, no Earth Engine, nothing
-deleted) followed by a re-map of the tile (`process_tile`); the five dry-run tiles went through
-exactly that on 2026-09-03.
+col)` (re-rasterizes the id layers of a stored tile into the ancillary store, one commit, no Earth
+Engine) followed by a re-map of the tile (`process_tile`).
 
-## Fleet mechanics
+## Wave mechanics
 
-The full ~4,320-tile campaign runs as a GitHub Actions fleet (`.github/workflows/pipeline_fleet.yml`),
-the production repo's icechunk fleet pattern adapted to blob-existence ledgers:
+The ~4,320-tile campaign runs as GitHub Actions matrices (`.github/workflows/get_ancillary_data.yml`,
+`process_tiles.yml`), the production repo's icechunk fleet pattern:
 
-- **done-check**: stage 0 = marker blob in `ancillary/<grid>/_complete/` (flat dir, written only
-  AFTER a verified re-read — zarr metadata appears at the START of a write, so its presence
-  can't be trusted). Stage 1 = the partials parquet exists (single blob = atomic).
-- **dispatch**: `scripts/get_remaining_work.py` lists both ledgers (2 list calls), diffs against
-  `tile_data/ancillary_tiles_v10.txt` (every tile whose composites hold data, from the icechunk
-  history; `pipeline.ipynb` regenerates it), writes a batch manifest; `scripts/run_fleet_batch.py`
-  runs `process_tile` per tile with per-tile error isolation (a failed tile leaves NO output and
-  is re-listed next dispatch). Re-dispatch until the plan job reports 0 remaining.
-- **hosting**: the workflows run on the GitHub-hosted runners of this repository with the three
-  repository secrets (`AZURE_STORAGE_SAS_TOKEN`, `AZURE_STORAGE_ACCOUNT`, `EE_SERVICE_ACCOUNT_KEY`);
-  the production repo is checked out at the commit pinned in the workflow `env` (mirrored in
-  `pixi.toml`). A concurrency group keeps one fleet run per config file.
-- **sizing** (2026-08-25 canary): ~2.5 min per tile plus ~12 min fixed per job (env + the 2.7 GB
-  BasinATLAS cache warm) → 36 tiles/job (~1.7 h, ~120 jobs, ~200 job-hours). Failure policy in
-  `build_ancillary_tile`: a raster layer fills with nodata only outside its documented latitude
-  coverage (`datacube.LAYER_LAT_COVERAGE`) or on the source's own no-data signal; any other
-  failure raises (failure = no output, never wrong output).
-- **memory**: the tabulate step peaks at ~3–4 GB per tile; fine on the 16 GB public runners.
-- **grid**: the ancillary lives on a per-tile UTM 80 m grid (the store window is reprojected onto it at
-  tabulate time). One icechunk repository on the dataset's geographic grid was considered on 2026-09-03
-  and deferred — see the design note in [docs/aggregation_lineage.md](../docs/aggregation_lineage.md).
-  Rebuilding with a different `pixi.lock` changes the terrain layers at the metre level (GDAL/PROJ warp
-  numerics), so one grid generation is built with one lock.
+- **ledgers**: wave 2 = a commit with metadata (`kind: ancillary_tile, tile: [row, col]`) in the
+  ancillary repository, folded from its history (`datacube.completed_ancillary_tiles`); wave 3 = the
+  partials parquet exists (single blob = atomic, one list call). A failed tile commits or writes nothing
+  and is re-listed by the next dispatch.
+- **dispatch**: `scripts/get_remaining_work.py --stage ancillary|partials` folds the ledgers, diffs
+  against `tile_data/ancillary_tiles_v10.txt` (every tile whose composites hold data, from the dataset's
+  commit history; `pipeline.ipynb` regenerates it) and writes a batch manifest that every matrix job of
+  the run reads; wave 3 dispatches only tiles WITH an ancillary commit. The workers
+  (`build_ancillary_batch.py`, `process_tiles_batch.py`) isolate errors per tile and log one line per
+  step (target grid, every layer with its source and timing, the write and commit; the two window
+  reads, the UTM reprojection and tabulation, the map). Re-dispatch until the plan job reports 0.
+- **start_fresh** (off by default) deletes that wave's products of the version first
+  (`datacube.reset_version`: the ancillary repository, or the partials and pixel tables) — the only
+  deletion the workflows can make.
+- **hosting**: the GitHub-hosted runners of this repository with the repository secrets
+  (`AZURE_STORAGE_SAS_TOKEN`, `AZURE_STORAGE_ACCOUNT`, `EE_SERVICE_ACCOUNT_KEY`; wave 3 needs no
+  Earth Engine); the production repo is checked out at the commit pinned in the workflow `env`
+  (mirrored in `pixi.toml`). One run per workflow and config file at a time (concurrency groups).
+- **sizing**: wave 2 ~2.5 min per tile (the forest-cover read dominates) plus ~12 min fixed per job
+  (env + the 2.7 GB BasinATLAS cache warm) → 36 tiles/job; wave 3 ~1 min per tile, ~3 min fixed →
+  72 tiles/job. Failure policy in `build_ancillary_window`: a raster layer fills with nodata only
+  outside its documented latitude coverage (`datacube.LAYER_LAT_COVERAGE`) or on the source's own
+  no-data signal; any other failure raises (failure = no output, never wrong output).
+- **grids**: the ancillary lives on the dataset grid (one grid generation is built with one
+  `pixi.lock`: rebuilding with different GDAL/PROJ versions changes the terrain layers at the metre
+  level); the tabulation grid is the tile's UTM 80 m grid, onto which both windows are reprojected
+  (`datacube.UTM_RESAMPLING`), so pixel counts stay area. The design note in
+  [docs/aggregation_lineage.md](../docs/aggregation_lineage.md) has the trade-offs.
+- **memory**: wave 2 peaks at ~3 GB per tile, wave 3 at ~3–4 GB (the tabulate); fine on the 16 GB
+  public runners.
 
 ## The ERA5-Land store
 
 One icechunk repository per dataset version (`gsro_analysis/era5.py`), the production repo's fleet
-pattern applied to eleven work units: the `ERA5 Acquire` workflow's plan job creates the repository
+pattern applied to eleven work units: the `Get ERA5-Land data` workflow's plan job creates the repository
 with an empty, all-NaN template if it does not exist (every water year of the config, 9 hemisphere-aware
 months, the native 1800 × 3600 grid with cell centres at multiples of 0.1°, north-down), folds the
 commit history to list the water years without a commit, and runs one job per missing year; each job

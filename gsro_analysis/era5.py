@@ -34,7 +34,6 @@ Needs Earth Engine (``settings.initialize_earthengine()``, service-account key,
 works headless) and the Azure SAS token (through the production ``Config``).
 """
 
-import random
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -42,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import xarray as xr
 
-from gsro_analysis import settings
+from gsro_analysis import ledger, settings
 
 EE_COLLECTION = "ECMWF/ERA5_LAND/MONTHLY_AGGR"
 
@@ -110,50 +109,29 @@ def repo_prefix(config):
 
 
 def repo_storage(config):
-    import icechunk
-    container, prefix = repo_prefix(config).split('/', 1)
-    return icechunk.azure_storage(account=config.azure_storage_account, container=container,
-                                  prefix=prefix, sas_token=config.sas_token)
+    return ledger.azure_storage(config, repo_prefix(config))
 
 
 def repo_config():
-    """Storage retries for many concurrent GitHub Actions writers (as the production output repo)."""
-    import icechunk
-    cfg = icechunk.RepositoryConfig.default()
-    cfg.storage = icechunk.StorageSettings(retries=icechunk.StorageRetriesSettings(
-        max_tries=20, initial_backoff_ms=200, max_backoff_ms=60_000))
-    return cfg
+    return ledger.repo_config()
 
 
 def _storage(config, local_store=None):
-    import icechunk
-    return icechunk.local_filesystem_storage(str(local_store)) if local_store else repo_storage(config)
+    return ledger.storage(config, repo_prefix(config), local_store)
 
 
 def repo_exists(config, local_store=None):
-    import icechunk
-    return icechunk.Repository.exists(_storage(config, local_store))
+    return ledger.repo_exists(config, repo_prefix(config), local_store)
 
 
 def open_repo(config, local_store=None):
     """Open the version's repository (``local_store``: a local icechunk repo path, for tests);
     a clear FileNotFoundError when it has not been created yet."""
-    import icechunk
-    storage = _storage(config, local_store)
-    if not icechunk.Repository.exists(storage):
-        raise FileNotFoundError(
-            f"no ERA5-Land repository at {local_store or repo_prefix(config)}: the ERA5 Acquire "
-            "workflow creates it (or era5.initialize(config))")
-    return icechunk.Repository.open(storage, config=repo_config())
+    return ledger.open_repo(config, repo_prefix(config), local_store, what='ERA5-Land repository')
 
 
 def _provenance():
-    try:
-        from global_snowmelt_runoff_onset.provenance import collect_provenance
-        return collect_provenance()
-    except Exception:  # noqa: BLE001 - provenance must never fail a commit
-        import platform
-        return {"host": platform.node()}
+    return ledger.provenance()
 
 
 def build_template(config):
@@ -191,25 +169,15 @@ def build_template(config):
 
 def initialize(config, start_fresh=False, local_store=None, log=print):
     """Return the version's repository, creating it with the empty template if it does not
-    exist. ``start_fresh=True`` DELETES an existing repository first (the ERA5 Acquire
+    exist. ``start_fresh=True`` DELETES an existing repository first (the 'Get ERA5-Land data'
     workflow's off-by-default box; the only deletion in this module)."""
-    import icechunk
-    storage = _storage(config, local_store)
-    if icechunk.Repository.exists(storage):
+    if repo_exists(config, local_store):
         if not start_fresh:
             log(f"repository exists: {local_store or repo_prefix(config)}")
-            return icechunk.Repository.open(storage, config=repo_config())
-        if local_store:
-            import shutil
-            shutil.rmtree(local_store)
-        else:
-            fs = settings.fresh_blob_fs(config)
-            fs.rm(repo_prefix(config), recursive=True)
-            fs.invalidate_cache()
-        log(f"deleted {local_store or repo_prefix(config)} (start_fresh)")
+            return open_repo(config, local_store)
+        ledger.delete_repo(config, repo_prefix(config), local_store, log=log)
     years = [int(y) for y in config.water_years]
-    repo = icechunk.Repository.create(storage, config=repo_config())
-    repo.save_config()
+    repo = ledger.create_repo(config, repo_prefix(config), local_store)
     template, encoding = build_template(config)
     session = repo.writable_session(BRANCH)
     template.to_zarr(session.store, mode='w', zarr_format=3, compute=False, write_empty_chunks=False,
@@ -227,16 +195,7 @@ def initialize(config, start_fresh=False, local_store=None, log=print):
 # the ledger: a fold over the commit history
 
 def commit_records(repo, branch=BRANCH):
-    """Newest -> oldest list of the pipeline commits' metadata (init/maintenance commits
-    without the schema key are skipped), each with its ``ancestry_index`` (0 = newest)."""
-    records = []
-    for index, snap in enumerate(repo.ancestry(branch=branch)):
-        meta = snap.metadata or {}
-        if 'schema' not in meta or 'kind' not in meta:
-            continue
-        records.append({'ancestry_index': index, 'snapshot_id': snap.id,
-                        'written_at': str(snap.written_at), **meta})
-    return records
+    return ledger.commit_records(repo, branch)
 
 
 def status(config, repo=None, local_store=None):
@@ -263,25 +222,8 @@ def status(config, repo=None, local_store=None):
 
 def commit_with_retry(repo, write_fn, message, metadata, branch=BRANCH, allow_empty=False,
                       max_tries=COMMIT_MAX_TRIES, log=print):
-    """Write through a FRESH session and commit, rebasing over concurrent commits
-    (``ConflictDetector``: always clean here, the writers touch disjoint chunks) and
-    retrying the whole write on transient errors — the production fleet's routine."""
-    import icechunk
-    last = None
-    for attempt in range(max_tries):
-        try:
-            session = repo.writable_session(branch)
-            write_fn(session)
-            return session.commit(message, metadata=metadata,
-                                  rebase_with=icechunk.ConflictDetector(), allow_empty=allow_empty)
-        except (ValueError, KeyError, TypeError, AssertionError):
-            raise                                        # programming/schema errors
-        except Exception as e:  # noqa: BLE001 - conflict, expired session, storage blip
-            last = e
-            delay = min(60, 2 ** attempt) * random.uniform(0.5, 1.5)
-            log(f"commit attempt {attempt + 1}/{max_tries} failed ({type(e).__name__}: {e}); retry in {delay:.0f}s")
-            time.sleep(delay)
-    raise RuntimeError(f"commit failed after {max_tries} attempts") from last
+    return ledger.commit_with_retry(repo, write_fn, message, metadata, branch=branch, allow_empty=allow_empty,
+                                    max_tries=max_tries, log=log)
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +391,7 @@ def open_anomaly(config, repo=None, local_store=None, chunks='auto'):
     st = status(config, repo)
     if st['anomaly'] is None:
         raise FileNotFoundError(
-            f"no anomaly commit in {repo_prefix(config)}: run the ERA5 Acquire workflow (it builds the "
+            f"no anomaly commit in {repo_prefix(config)}: run the 'Get ERA5-Land data' workflow (it builds the "
             "anomaly once every water year is committed) or era5.build_anomaly(config)")
     if st['anomaly_stale']:
         warnings.warn("the ERA5-Land anomaly group is stale (a water year was committed after it, or the "

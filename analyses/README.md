@@ -30,7 +30,8 @@ the two composite notebooks build their own sweeps (skip-if-complete, `REBUILD_S
 
 Conventions: the version comes from `settings.load_config()` only; every artifact names its version
 and its pixel filter (`fcf_lte_50` everywhere, the case study included); statistics come from the cube
-via `aggregate.weighted_mean` / `collapse` / `threshold`, never re-derived by hand; the mountain-range
+via `aggregate.weighted_mean` / `collapse` / `threshold`, never re-derived by hand; regressions on the
+eleven water years report the Theil–Sen slope next to OLS (see the analysis note in `docs/aggregation_lineage.md`); the mountain-range
 notebooks start from `stats.prepare_mountain_ranges` (CHILI collapsed, bins with ≤ 100 pixels masked,
 a bin-year needs > 30 % of the bin's median pixels, the tropical-Andes rule); renders are PNG at
 ≤ 300 dpi; annotated colorbars come from `gsro_analysis.colorbars`; the two inset world maps come from

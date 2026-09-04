@@ -1,32 +1,46 @@
-"""Per-tile UTM datacube construction: reproject a tile of the global
-runoff-onset dataset to UTM 80 m and annotate it with the static ancillary
-layers (DEM + slope/aspect, CHILI, seasonal snow class, ESA WorldCover,
-forest cover fraction, GMBA range / HydroBASINS basin / continent IDs),
-then tabulate (in memory) and emit the tile's PARTIAL SUMS for the
-aggregation (gsro_analysis.aggregate.tile_partials) — the fleet product.
+"""Per-tile ancillary and tabulation engine of the analysis pipeline, in two waves
+(pipeline/README.md):
 
-The ancillary layers are static per GRID generation — they do not change
-with dataset version: built once per grid (compact integer encodings,
-~8 MB/tile), joined with onset values per version. The per-tile pixel
-table (parquet) is an OPT-IN product (process_tile(keep_pixels=True)):
-the analyses never read it, the partials carry everything they need.
-See pipeline/README.md.
+**Get ancillary data** (once per GRID generation): the eight source layers
+(:data:`ANCILLARY_LAYERS`) resampled onto the tile's window of the DATASET grid
+(EPSG:4326, 0.00072 deg, 2048 x 2048 per tile) and written into ONE icechunk
+repository on the global dataset geobox with compact integer encodings
+(:data:`ANCILLARY_ENCODING`; one chunk per tile per layer). One commit per tile
+with metadata is the ledger (gsro_analysis.ledger, the production fleet
+pattern): :func:`initialize_ancillary_store`, :func:`build_ancillary_window`,
+:func:`write_ancillary_tile`, :func:`completed_ancillary_tiles`,
+:func:`open_ancillary_window`.
+
+**Process tiles to parquets** (per dataset version): :func:`process_tile` reads
+the tile's window from the dataset store and from the ancillary store (the same
+pixel indices: both live on the dataset grid), reprojects BOTH onto the tile's
+80 m UTM grid (:func:`tile_utm_template`; onset, DEM, CHILI and forest cover
+bilinear, the categorical and id layers nearest), derives slope and aspect from
+the UTM DEM (xdem), tabulates the pixels (:func:`tabulate_tile`) and writes the
+tile's partial sums (:func:`write_partials`; the pixel table is opt-in). Every
+row is a ~6,400 m2 UTM pixel, so pixel counts stay area and no area weight is
+needed; the price is that the continuous layers are resampled twice.
+
+Unit-definition changes after the ancillary exists are :func:`refresh_unit_layers`
+(re-rasterize the id layers into the store, one commit, no Earth Engine) plus a
+re-map. :func:`reset_version` is the only deleting code (dry run by default).
 """
 
-import numpy as np
-import xarray as xr
-import pystac_client
-import xdem
+import logging
+import time
+
 import easysnowdata
-import rasterio
+import geopandas as gpd
+import numpy as np
 import odc.stac
 import planetary_computer
-import logging
-import geopandas as gpd
+import pystac_client
+import rasterio
 import rioxarray as rxr
+import xarray as xr
+import xdem
 
-from gsro_analysis import paths, settings
-
+from gsro_analysis import ledger, paths, settings
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +59,7 @@ def setup_logging(level: int = logging.INFO) -> None:
     logging.basicConfig(filename=paths.logfile(), level=level,
                         format='%(asctime)s - %(levelname)s - %(message)s')
 
+
 def convert_water_year_dim_to_var(ds):
     for year in ds.water_year.values:
         ds[f'runoff_onset_WY{year}'] = ds['runoff_onset'].sel(water_year=year)
@@ -52,33 +67,22 @@ def convert_water_year_dim_to_var(ds):
     ds = ds.drop_vars('runoff_onset').drop_vars('water_year')
     return ds
 
-def add_topography(tile,ds):
-    catalog = pystac_client.Client.open("https://planetarycomputer.microsoft.com/api/stac/v1",modifier=planetary_computer.sign_inplace)
-    search = catalog.search(collections=[f"cop-dem-glo-30"],intersects=tile.geobox.geographic_extent)
-    dem_da = odc.stac.load(items=search.items(),like=ds,chunks={},resampling='bilinear')['data'].squeeze()
-    dem_da = dem_da.rio.write_nodata(-32767,encoded=True).drop_vars('time') # compute for xdem stuff
 
+# ---------------------------------------------------------------------------
+# the source layers, each resampled onto the target grid carried by ds['dem'] (or the template)
+
+def add_dem(tile, ds):
+    """Copernicus DEM GLO-30 (Planetary Computer) resampled bilinearly onto the target grid
+    (``like=ds``). Slope and aspect are NOT derived here: they need a metric grid and are
+    computed at process time from the UTM-reprojected DEM (:func:`terrain_derivatives`)."""
+    catalog = pystac_client.Client.open("https://planetarycomputer.microsoft.com/api/stac/v1",
+                                        modifier=planetary_computer.sign_inplace)
+    search = catalog.search(collections=["cop-dem-glo-30"], intersects=tile.geobox.geographic_extent)
+    dem_da = odc.stac.load(items=search.items(), like=ds, chunks={}, resampling='bilinear')['data'].squeeze()
+    dem_da = dem_da.rio.write_nodata(-32767, encoded=True).drop_vars('time')
     ds['dem'] = dem_da.compute()
-
-    # [xDEM](https://xdem.readthedocs.io/en/stable/index.html) to calculate slope and aspect and topographic position index
-
-    attributes = xdem.terrain.get_terrain_attribute(
-        ds['dem'],
-        resolution=ds['dem'].rio.resolution()[0],
-        attribute=["aspect", "slope"], # , "topographic_position_index"
-    )
-
-    ds['aspect'] = xr.DataArray(attributes[0], dims=ds['dem'].dims, coords=ds['dem'].coords)
-    ds['slope'] = xr.DataArray(attributes[1], dims=ds['dem'].dims, coords=ds['dem'].coords)
-    # TPI? https://xdem.readthedocs.io/en/stable/gen_modules/xdem.DEM.topographic_position_index.html, https://tc.copernicus.org/articles/8/1989/2014/tc-8-1989-2014.pdf
-    # maybe incorrect radius...
-    #ds['tpi'] = xr.DataArray(attributes[2], dims=ds['dem'].dims, coords=ds['dem'].coords)
-
-    # DAH?
-    # alpha_max = 202.5 #only in northern hemisphere at specific latitude?
-    # DAH_da = np.cos(np.deg2rad(alpha_max-aspect_da))*np.arctan(np.deg2rad(slope_da))
-
     return ds
+
 
 CHILI_ASSET = "CSP/ERGo/1_0/Global/ALOS_CHILI"
 
@@ -121,6 +125,7 @@ def add_chili(tile, ds):
     ds['chili'] = chili_da.rio.reproject_match(ds['dem'], resampling=rasterio.enums.Resampling.bilinear)
     return ds
 
+
 def add_snow_class(tile,ds,mask_nodata=True):
 
     snow_classification = easysnowdata.remote_sensing.get_seasonal_snow_classification(tile.bbox_gdf,mask_nodata=True)
@@ -128,12 +133,14 @@ def add_snow_class(tile,ds,mask_nodata=True):
 
     return ds
 
+
 def add_esa_worldcover(tile,ds,mask_nodata=True):
 
     esa_worldcover = easysnowdata.remote_sensing.get_esa_worldcover(tile.bbox_gdf, mask_nodata=True)
     ds['esa_worldcover'] = esa_worldcover.rio.reproject_match(ds['dem'],resampling=rasterio.enums.Resampling.mode)
 
     return ds
+
 
 def add_forest_cover(tile,ds,mask_nodata=True):
 
@@ -147,7 +154,8 @@ def add_forest_cover(tile,ds,mask_nodata=True):
 
     return ds
 
-def add_mountain_range_and_basin_and_continent(tile,ds):
+
+def add_mountain_range_and_basin_and_continent(tile, ds, log=print):
     from geocube.api.core import make_geocube
 
     # vector sources are downloaded ONCE into data/geometries/sources/ —
@@ -158,7 +166,7 @@ def add_mountain_range_and_basin_and_continent(tile,ds):
         gmba_zip, mask=tile.bbox_gdf).clip(tile.bbox_gdf)
 
     if gmba_clipped_gdf.empty:
-        print(f"tile {tile.row},{tile.col} has no mountain ranges, filling with -9999")
+        log(f"tile {tile.row},{tile.col}: no mountain ranges in the tile, id layer filled with -9999")
         ds['GMBA_V2_ID'] = xr.full_like(ds['dem'], fill_value=-9999, dtype=np.int16)
     else:
         out_grid = make_geocube(
@@ -177,7 +185,7 @@ def add_mountain_range_and_basin_and_continent(tile,ds):
     basins_clipped_gdf = basins_gdf.clip(tile.bbox_gdf)
 
     if basins_clipped_gdf.empty:
-        print(f"tile {tile.row},{tile.col} has no basins, filling with -9999")
+        log(f"tile {tile.row},{tile.col}: no basins in the tile, id layer filled with -9999")
         ds['PFAF_ID'] = xr.full_like(ds['dem'], fill_value=-9999, dtype=np.int32)
     else:
         out_grid = make_geocube(
@@ -197,7 +205,7 @@ def add_mountain_range_and_basin_and_continent(tile,ds):
     continents_clipped_gdf = continents_gdf.clip(tile.bbox_gdf)
     
     if continents_clipped_gdf.empty:
-        print(f"tile {tile.row},{tile.col} has no continents, filling with -9999")
+        log(f"tile {tile.row},{tile.col}: no continents in the tile, id layer filled with -9999")
         ds['continent'] = xr.full_like(ds['dem'], fill_value=-9999, dtype=np.int16)
         
     else:
@@ -219,11 +227,7 @@ def add_mountain_range_and_basin_and_continent(tile,ds):
 
 
 # ---------------------------------------------------------------------------
-# Option A pipeline: static per-tile ancillary rasters + per-version tabulate
-# (see pipeline/README.md). The ancillary is keyed by GRID generation and
-# rebuilt only when the grid changes; tabulation joins onset values from any
-# dataset version onto it by reproject_match, so alignment is exact by
-# construction.
+# the tile's UTM 80 m grid: the TABULATION grid (the rows of the pixel table are its pixels)
 
 def tile_utm_template(config, row, col):
     """The tile's UTM 80 m target grid, derived WITHOUT onset data: zeros on
@@ -265,120 +269,23 @@ LAYER_LAT_COVERAGE = {
 }
 
 
-def build_ancillary_tile(config, row, col, mask_nodata=True):
-    """Static ancillary raster datacube for one tile on the UTM 80 m grid.
+# ---------------------------------------------------------------------------
+# the ancillary store: one icechunk repository per grid generation on the dataset grid
 
-    Failure policy (fleet rule: failure = no output, never wrong output):
-    a raster layer fills with nodata ONLY when the tile lies outside the
-    source's documented latitude coverage (:data:`LAYER_LAT_COVERAGE`) or
-    the source itself reports no data in bounds — any other failure
-    (network, auth, API) raises so the tile is retried, not corrupted.
-    The vector-ID layers (GMBA/PFAF/continent) handle legitimately-empty
-    tiles internally and are never exception-wrapped. Attrs record the
-    grid params, the continent enum, and provenance.
-    """
-    from rioxarray.exceptions import NoDataInBounds
-
-    tile = config.get_tile(row, col)
-    _, tile_south, _, tile_north = tile.bbox_gdf.total_bounds
-    template = tile_utm_template(config, row, col)
-    ds = template.to_dataset(name='_template')
-    # lat/lon are NOT stored: they are an exact function of the UTM grid
-    # (x, y, utm_crs) and are recomputed at tabulate time (_utm_latlon_arrays)
-
-    def _fill(layers, reason):
-        nonlocal ds
-        logger.warning(f"tile {row},{col}: filling {layers} with nodata ({reason})")
-        for name in layers:
-            ds[name] = xr.full_like(template, np.nan)
-
-    def _fetch(fn, *args, layers, coverage=None, **kwargs):
-        nonlocal ds
-        if coverage is not None and (tile_south > coverage[1]
-                                     or tile_north < coverage[0]):
-            _fill(layers, f"tile outside {fn.__name__} coverage {coverage}")
-            return
-        straddles = coverage is not None and (tile_south < coverage[0]
-                                              or tile_north > coverage[1])
-        try:
-            ds = fn(*args, **kwargs)
-        except NoDataInBounds as e:  # the source's own definitive empty signal
-            _fill(layers, f"{fn.__name__}: {e}")
-        except Exception as e:
-            if straddles:  # partially past the coverage edge: expected
-                _fill(layers, f"{fn.__name__} at coverage edge: {e}")
-            else:          # inside documented coverage: a REAL failure
-                raise
-
-    _fetch(add_topography, tile, ds, layers=('dem', 'aspect', 'slope'))
-    _fetch(add_chili, tile, ds, layers=('chili',),
-           coverage=LAYER_LAT_COVERAGE['chili'])
-    _fetch(add_snow_class, tile, ds, mask_nodata=mask_nodata,
-           layers=('snow_classification',))
-    _fetch(add_esa_worldcover, tile, ds, mask_nodata=mask_nodata,
-           layers=('esa_worldcover',),
-           coverage=LAYER_LAT_COVERAGE['esa_worldcover'])
-    _fetch(add_forest_cover, tile, ds, mask_nodata=mask_nodata,
-           layers=('forest_cover_fraction',),
-           coverage=LAYER_LAT_COVERAGE['forest_cover_fraction'])
-    # vector IDs: internal empty-handling only — exceptions must propagate
-    ds = add_mountain_range_and_basin_and_continent(tile, ds)
-
-    ds = ds.drop_vars('_template')
-    # keep only serializable attrs: easysnowdata >= 0.0.25 attaches dict-valued attrs (snow-class
-    # names/colours) that zarr would stringify and netCDF refuses
-    for name in ds.data_vars:
-        ds[name].attrs = {k: v for k, v in ds[name].attrs.items()
-                          if isinstance(v, (str, bytes, int, float, list, tuple, np.ndarray, np.number))}
-    continents_gdf = gpd.read_file(settings.cached_source(settings.CONTINENTS_URL))
-    enum = list(np.unique(list(continents_gdf.CONTINENT)))
-    ds.attrs.update({
-        'tile_row': row, 'tile_col': col,
-        'grid': f"{config.version}_grid",
-        'utm_crs': str(template.rio.crs),
-        'resolution_m': 80,
-        'continent_enum': [f"{i}:{name}" for i, name in enumerate(enum)],
-        'basin_atlas_layer': settings.BASIN_ATLAS_LAYER,   # the PFAF_ID level (6 since 2026-09-03)
-    })
-    try:
-        from global_snowmelt_runoff_onset.provenance import collect_provenance
-        ds.attrs['provenance'] = str(collect_provenance())
-    except Exception:
-        pass
-    return ds
-
-
-def ancillary_tile_path(config, row, col):
-    """Azure path of a tile's ancillary zarr (container-relative)."""
-    return (f"{settings.ANCILLARY_PREFIX}/{config.version}_grid/"
-            f"tile_{row:03d}_{col:03d}.zarr")
-
-
-def fresh_blob_fs(config):
-    """See :func:`gsro_analysis.settings.fresh_blob_fs`."""
-    return settings.fresh_blob_fs(config)
-
-
-# Every variable a finished ancillary tile must contain. Layers outside a
-# source's latitude coverage are still present — filled with nodata.
-# (original_lat/lon were stored before 2026-08-26; tiles that still carry
-# them are valid — the extra layers are ignored.)
+# the eight layers fetched from their sources and stored on the dataset grid
+ANCILLARY_LAYERS = ('dem', 'chili', 'snow_classification', 'esa_worldcover',
+                    'forest_cover_fraction', 'GMBA_V2_ID', 'PFAF_ID', 'continent')
+# derived at process time from the UTM-reprojected DEM (they need a metric grid)
+DERIVED_LAYERS = ('aspect', 'slope')
+# every ancillary column of the pixel table
 ANCILLARY_VARS = ('dem', 'aspect', 'slope', 'chili', 'snow_classification',
                   'esa_worldcover', 'forest_cover_fraction', 'GMBA_V2_ID',
                   'PFAF_ID', 'continent')
 
-# Compact on-disk encodings. The source layers arrive as float32/float64
-# (make_geocube, easysnowdata, xdem) — 48 MB per tile as written before
-# 2026-08-26, 8 MB with these (measured on tile 016_152; ~200 GB -> ~35 GB
-# for the 4,320-tile grid). CF scale/offset + _FillValue mean the DECODED
-# values are what tabulate_tile has always seen (chili is quantized to 1e-4,
-# the precision the pixel table already rounds it to); nodata decodes to
-# NaN and tabulate maps it to -9999 as before. One chunk per layer: tiles
-# are always read whole, and 10 objects list/read faster than 220.
+# Compact on-disk encodings (CF scale/offset + _FillValue, so the DECODED values are what
+# tabulate_tile sees: chili quantized to 1e-4, nodata -> NaN). ~56 MB raw per tile.
 ANCILLARY_ENCODING = {
     'dem':                   {'dtype': 'int16', '_FillValue': -9999},
-    'slope':                 {'dtype': 'uint8', '_FillValue': 255},
-    'aspect':                {'dtype': 'int16', '_FillValue': -9999},
     'chili':                 {'dtype': 'uint16', '_FillValue': 65535,
                               'scale_factor': 1e-4, 'add_offset': 0.0},
     'snow_classification':   {'dtype': 'uint8', '_FillValue': 255},
@@ -388,64 +295,287 @@ ANCILLARY_ENCODING = {
     'PFAF_ID':               {'dtype': 'int32', '_FillValue': -9999},
     'continent':             {'dtype': 'int8', '_FillValue': -1},   # -1 = geocube's no-category code
 }
+LAYER_ATTRS = {
+    'dem': {'long_name': 'Copernicus DEM GLO-30 elevation', 'units': 'm'},
+    'chili': {'long_name': 'Continuous Heat-Insolation Load Index, asset value / 255',
+              'source': 'CSP/ERGo/1_0/Global/ALOS_CHILI'},
+    'snow_classification': {'long_name': 'Sturm & Liston 2021 seasonal snow classification'},
+    'esa_worldcover': {'long_name': 'ESA WorldCover v200 land cover class'},
+    'forest_cover_fraction': {'long_name': 'PROBA-V LC100 tree cover fraction', 'units': 'percent'},
+    'GMBA_V2_ID': {'long_name': 'GMBA mountain inventory v2 (standard 300) range id'},
+    'PFAF_ID': {'long_name': 'HydroBASINS Pfafstetter id (BasinATLAS)'},
+    'continent': {'long_name': 'continent index (see continent_enum)'},
+}
+# how each stored layer moves from the dataset grid onto the 80 m UTM grid at process time
+UTM_RESAMPLING = {
+    'dem': rasterio.enums.Resampling.bilinear,
+    'chili': rasterio.enums.Resampling.bilinear,
+    'forest_cover_fraction': rasterio.enums.Resampling.bilinear,
+    'snow_classification': rasterio.enums.Resampling.nearest,
+    'esa_worldcover': rasterio.enums.Resampling.nearest,
+    'GMBA_V2_ID': rasterio.enums.Resampling.nearest,
+    'PFAF_ID': rasterio.enums.Resampling.nearest,
+    'continent': rasterio.enums.Resampling.nearest,
+}
+KIND_ANCILLARY_TILE = 'ancillary_tile'
 
 
-def ancillary_encoding(ds):
-    """zarr v3 encoding for save_ancillary_tile: the compact dtypes above,
-    zstd, one chunk per layer. Integer-coded layers are rounded first (xarray
-    rounds too, but be explicit; values already integral are unchanged)."""
+def ancillary_repo_prefix(config):
+    """Container-qualified Azure prefix of the grid generation's ancillary icechunk repository."""
+    return f"{settings.ANCILLARY_PREFIX}/{config.version}_grid/ancillary"
+
+
+def ancillary_repo_exists(config, local_store=None):
+    return ledger.repo_exists(config, ancillary_repo_prefix(config), local_store)
+
+
+def open_ancillary_repo(config, local_store=None):
+    return ledger.open_repo(config, ancillary_repo_prefix(config), local_store, what='ancillary repository')
+
+
+def tile_geo_template(config, row, col):
+    """The tile's window of the dataset grid (EPSG:4326, 0.00072 deg, 2048 x 2048 except edge
+    tiles) as a float32 zeros DataArray with CRS: the build target of the ancillary layers."""
+    import odc.geo.xr as odc_xr
+    da = odc_xr.xr_zeros(config.geobox_tiles[row, col], dtype='float32')
+    if 'y' in da.dims:
+        da = da.rename({'y': 'latitude', 'x': 'longitude'})
+    return da.rio.set_spatial_dims(x_dim='longitude', y_dim='latitude').rio.write_crs('EPSG:4326')
+
+
+def build_ancillary_template(config):
+    """Lazy all-NaN template of the eight layers on the GLOBAL dataset geobox plus its Zarr v3
+    encoding (compact ints, CF fill/scale, zstd, one chunk per tile per layer; the zarr
+    fill_value is the encoded nodata so never-written tiles decode to NaN). Written
+    metadata-only by :func:`initialize_ancillary_store`."""
+    import dask.array as da
+    import odc.geo.xr as odc_xr
     import zarr
-    enc = {}
+    geobox = config.global_geobox
+    tile_dim = config.spatial_chunk_dim_zarr_output
+    layers = {}
+    for name in ANCILLARY_LAYERS:
+        arr = odc_xr.wrap_xr(da.full(geobox.shape.yx, np.nan, dtype='float32', chunks=(tile_dim, tile_dim)), geobox)
+        layers[name] = arr.rename(name)
+    ds = xr.Dataset(layers)
+    if 'y' in ds.dims:
+        ds = ds.rename({'y': 'latitude', 'x': 'longitude'})
+    for name in ANCILLARY_LAYERS:
+        ds[name].attrs.update(LAYER_ATTRS[name])
+        ds[name].attrs['grid_mapping'] = 'spatial_ref'
+    continents_gdf = gpd.read_file(settings.cached_source(settings.CONTINENTS_URL))
+    enum = list(np.unique(list(continents_gdf.CONTINENT)))
+    ds.attrs.update({
+        'title': 'Static ancillary layers of the global snowmelt runoff onset analyses, on the dataset grid',
+        'grid': f"{config.version}_grid", 'crs': 'EPSG:4326', 'resolution_deg': float(config.resolution),
+        'tile_dim': int(tile_dim), 'layers': list(ANCILLARY_LAYERS),
+        'derived_at_process_time': list(DERIVED_LAYERS),
+        'continent_enum': [f"{i}:{name}" for i, name in enumerate(enum)],
+        'basin_atlas_layer': settings.BASIN_ATLAS_LAYER,
+        'chili_normalization': 'asset value / 255 (fixed 0-255 range, native lattice)',
+    })
     comp = [zarr.codecs.BloscCodec(cname='zstd', clevel=5, shuffle='shuffle')]
-    for name in ds.data_vars:
-        e = dict(ANCILLARY_ENCODING.get(name, {}))
-        if e and 'scale_factor' not in e:
-            ds[name] = ds[name].round()
-        # the source layers arrive with their own _FillValue/scale attrs and
-        # encodings (easysnowdata, odc.stac); ours must win, so clear them
-        for key in ('_FillValue', 'missing_value', 'scale_factor', 'add_offset', 'dtype'):
-            ds[name].attrs.pop(key, None)
-        ds[name].encoding = {}
-        e['compressors'] = comp
-        e['chunks'] = ds[name].shape
-        enc[name] = e
-    return enc
-
-# Completion ledger: one marker blob per FINISHED tile, written only after
-# to_zarr() returns. zarr writes its root metadata (zarr.json / .zmetadata)
-# up front, so metadata presence can't distinguish a finished tile from one
-# whose writer died mid-upload — tile 016_152 was exactly that on 2026-08-24
-# (7 of 12 vars) and got skipped as "done". Existence checks must key on the
-# ledger, never on zarr metadata. The ledger is a FLAT directory so the
-# fleet dispatcher gets the whole done-set in one list call instead of
-# probing 4,000+ tiles individually.
-
-def ancillary_ledger_dir(config):
-    return f"{settings.ANCILLARY_PREFIX}/{config.version}_grid/_complete"
+    encoding = {}
+    for name in ANCILLARY_LAYERS:
+        e = dict(ANCILLARY_ENCODING[name])
+        encoding[name] = {**e, 'fill_value': e['_FillValue'], 'chunks': (tile_dim, tile_dim), 'compressors': comp}
+    return sanitize_attrs(ds), encoding
 
 
-def ancillary_marker_path(config, row, col):
-    return f"{ancillary_ledger_dir(config)}/tile_{row:03d}_{col:03d}.json"
+def initialize_ancillary_store(config, start_fresh=False, local_store=None, log=print):
+    """Return the grid generation's ancillary repository, creating it with the empty template
+    if it does not exist. ``start_fresh=True`` DELETES an existing repository first (the
+    'Get ancillary data' workflow's off-by-default box)."""
+    prefix = ancillary_repo_prefix(config)
+    if ledger.repo_exists(config, prefix, local_store):
+        if not start_fresh:
+            log(f"ancillary repository exists: {local_store or prefix}")
+            return ledger.open_repo(config, prefix, local_store)
+        ledger.delete_repo(config, prefix, local_store, log=log)
+    repo = ledger.create_repo(config, prefix, local_store)
+    template, encoding = build_ancillary_template(config)
+    session = repo.writable_session(ledger.BRANCH)
+    template.to_zarr(session.store, mode='w', zarr_format=3, compute=False, write_empty_chunks=False,
+                     consolidated=False, encoding=encoding)
+    session.commit(f"initialize empty ancillary store, {config.version}_grid",
+                   metadata={'schema': ledger.SCHEMA, 'kind': 'init', 'grid': f"{config.version}_grid",
+                             'layers': list(ANCILLARY_LAYERS), 'tile_dim': int(config.spatial_chunk_dim_zarr_output),
+                             'shape': [int(v) for v in config.global_geobox.shape.yx],
+                             'provenance': ledger.provenance()})
+    log(f"initialized {local_store or prefix}: empty template {tuple(config.global_geobox.shape.yx)}, "
+        f"{len(ANCILLARY_LAYERS)} layers, one chunk per tile")
+    return repo
 
 
-def ancillary_tile_complete(config, row, col):
-    """True iff the tile's ancillary zarr finished writing (marker present)."""
-    return config.azure_blob_fs.exists(ancillary_marker_path(config, row, col))
+def ancillary_records(repo):
+    """Newest -> oldest ancillary-tile commit records (kind ``ancillary_tile``)."""
+    return [r for r in ledger.commit_records(repo) if r.get('kind') == KIND_ANCILLARY_TILE]
 
 
-def completed_ancillary_tiles(config):
-    """All (row, col) with a completion marker — one flat list call."""
-    fs = config.azure_blob_fs
-    ledger = ancillary_ledger_dir(config)
-    if not fs.exists(ledger):
-        return set()
-    out = set()
-    for p in fs.ls(ledger, detail=False):
-        name = p.rsplit('/', 1)[-1]
-        if name.startswith('tile_') and name.endswith('.json'):
-            _, r, c = name[:-len('.json')].split('_')
-            out.add((int(r), int(c)))
-    return out
+def completed_ancillary_tiles(config, repo=None, local_store=None):
+    """{(row, col)} with an ancillary commit: the fold over the store's commit history
+    (newest wins; a refreshed tile stays complete). Empty when the repository does not exist."""
+    if repo is None:
+        if not ancillary_repo_exists(config, local_store):
+            return set()
+        repo = open_ancillary_repo(config, local_store)
+    return {tuple(int(v) for v in r['tile']) for r in ancillary_records(repo)}
+
+
+def ancillary_tile_complete(config, row, col, repo=None):
+    return (row, col) in completed_ancillary_tiles(config, repo)
+
+
+def build_ancillary_window(config, row, col, mask_nodata=True, log=None):
+    """The tile's eight source layers on its window of the DATASET grid (wave 'Get ancillary
+    data'). Failure policy (fleet rule: failure = no output, never wrong output): a raster
+    layer fills with nodata ONLY when the tile lies outside the source's documented latitude
+    coverage (:data:`LAYER_LAT_COVERAGE`) or the source itself reports no data in bounds;
+    any other failure (network, auth, API) raises so the tile is retried, not corrupted.
+    The vector-id layers handle legitimately-empty tiles internally and are never
+    exception-wrapped. ``log`` receives one line per step."""
+    from rioxarray.exceptions import NoDataInBounds
+    log = log or logger.info
+    tile = config.get_tile(row, col)
+    _, tile_south, _, tile_north = tile.bbox_gdf.total_bounds
+    template = tile_geo_template(config, row, col)
+    ds = template.to_dataset(name='_template')
+    log(f"tile {row},{col}: ancillary target = the tile's window of the dataset grid "
+        f"(EPSG:4326, {template.sizes['latitude']} x {template.sizes['longitude']} px at 0.00072 deg)")
+    step_names = {
+        'add_dem': 'Copernicus DEM GLO-30 -> bilinear',
+        'add_chili': 'CHILI (Earth Engine, native lattice via xee) -> bilinear',
+        'add_snow_class': 'seasonal snow classification -> mode',
+        'add_esa_worldcover': 'ESA WorldCover -> mode',
+        'add_forest_cover': 'forest cover fraction (PROBA-V LC100) -> bilinear',
+    }
+
+    def _fill(layers, reason):
+        nonlocal ds
+        logger.warning(f"tile {row},{col}: filling {layers} with nodata ({reason})")
+        for name in layers:
+            ds[name] = xr.full_like(template, np.nan)
+
+    def _fetch(fn, *args, layers, coverage=None, **kwargs):
+        nonlocal ds
+        if coverage is not None and (tile_south > coverage[1] or tile_north < coverage[0]):
+            _fill(layers, f"tile outside {fn.__name__} coverage {coverage}")
+            return
+        straddles = coverage is not None and (tile_south < coverage[0] or tile_north > coverage[1])
+        t0 = time.time()
+        try:
+            ds = fn(*args, **kwargs)
+        except NoDataInBounds as e:  # the source's own definitive empty signal
+            _fill(layers, f"{fn.__name__}: {e}")
+        except Exception as e:
+            if straddles:  # partially past the coverage edge: expected
+                _fill(layers, f"{fn.__name__} at coverage edge: {e}")
+            else:          # inside documented coverage: a REAL failure
+                raise
+        log(f"tile {row},{col}:   {', '.join(layers)}: {step_names.get(fn.__name__, fn.__name__)} "
+            f"({time.time() - t0:.0f}s)")
+
+    _fetch(add_dem, tile, ds, layers=('dem',))
+    _fetch(add_chili, tile, ds, layers=('chili',), coverage=LAYER_LAT_COVERAGE['chili'])
+    _fetch(add_snow_class, tile, ds, mask_nodata=mask_nodata, layers=('snow_classification',))
+    _fetch(add_esa_worldcover, tile, ds, mask_nodata=mask_nodata, layers=('esa_worldcover',),
+           coverage=LAYER_LAT_COVERAGE['esa_worldcover'])
+    _fetch(add_forest_cover, tile, ds, mask_nodata=mask_nodata, layers=('forest_cover_fraction',),
+           coverage=LAYER_LAT_COVERAGE['forest_cover_fraction'])
+    # vector IDs: internal empty-handling only, exceptions must propagate
+    t0 = time.time()
+    ds = add_mountain_range_and_basin_and_continent(tile, ds, log=log)
+    log(f"tile {row},{col}:   GMBA_V2_ID, PFAF_ID, continent: polygons rasterized (geocube 0.0003 deg) -> mode "
+        f"({time.time() - t0:.0f}s)")
+    ds = ds.drop_vars('_template')[list(ANCILLARY_LAYERS)]
+    for name in ds.data_vars:   # keep only serializable attrs (easysnowdata >= 0.0.25 attaches dicts)
+        ds[name].attrs = {k: v for k, v in ds[name].attrs.items()
+                          if isinstance(v, (str, bytes, int, float, list, tuple, np.ndarray, np.number))}
+    ds.attrs.update({'tile_row': row, 'tile_col': col, 'grid': f"{config.version}_grid",
+                     'basin_atlas_layer': settings.BASIN_ATLAS_LAYER})
+    return ds
+
+
+def _encode_layer(name, values):
+    """Decoded layer values -> the stored integer array (CF inverse: (v - offset) / scale,
+    nodata -> the encoded fill)."""
+    e = ANCILLARY_ENCODING[name]
+    v = np.asarray(values, dtype='float64')
+    if 'scale_factor' in e:
+        v = (v - e.get('add_offset', 0.0)) / e['scale_factor']
+    out = np.where(np.isfinite(v), np.round(v), e['_FillValue'])
+    return out.astype(e['dtype'])
+
+
+def write_ancillary_tile(config, repo, row, col, ds, layers=ANCILLARY_LAYERS, duration_s=None, log=None):
+    """Write a tile's layers into their chunks of the ancillary store and commit them as ONE
+    ledger entry (kind ``ancillary_tile``; newest wins, so a rewrite or a unit-layer refresh
+    supersedes the previous commit). Returns the snapshot id."""
+    import zarr
+    from global_snowmelt_runoff_onset import store as gs_store
+    log = log or logger.info
+    region = gs_store.tile_region_slices(config, row, col)
+    ys, xs = region['latitude'], region['longitude']
+    shape = (ys.stop - ys.start, xs.stop - xs.start)
+    encoded, stats = {}, {}
+    for name in layers:
+        values = ds[name].values
+        if values.shape != shape:
+            raise ValueError(f"tile {row},{col}: {name} has shape {values.shape}, the tile window is {shape}")
+        encoded[name] = _encode_layer(name, values)
+        stats[name] = round(float(np.mean(encoded[name] != ANCILLARY_ENCODING[name]['_FillValue'])), 4)
+
+    def write_fn(session):
+        g = zarr.open_group(session.store, mode='r+')
+        for name, arr in encoded.items():
+            g[name][ys, xs] = arr
+
+    metadata = {'schema': ledger.SCHEMA, 'kind': KIND_ANCILLARY_TILE, 'tile': [int(row), int(col)],
+                'grid': f"{config.version}_grid", 'layers': list(layers), 'valid_fraction': stats,
+                'basin_atlas_layer': settings.BASIN_ATLAS_LAYER,
+                'duration_s': round(float(duration_s), 1) if duration_s is not None else None,
+                'provenance': ledger.provenance()}
+    snap = ledger.commit_with_retry(repo, write_fn, f"tile {row:03d}_{col:03d}: ancillary ({len(layers)} layers)",
+                                    metadata, log=log)
+    log(f"tile {row},{col}:   {len(layers)} layers written to the ancillary store and committed -> {snap}")
+    return snap
+
+
+def open_ancillary_window(config, row, col, repo=None, local_store=None):
+    """The tile's window of the ancillary store, decoded (nodata -> NaN, CHILI in 0-1) and
+    georeferenced (EPSG:4326). An uncommitted tile reads back as all-NaN, so callers check
+    the ledger first."""
+    from global_snowmelt_runoff_onset import store as gs_store
+    repo = repo or open_ancillary_repo(config, local_store)
+    ds = xr.open_zarr(repo.readonly_session(ledger.BRANCH).store, consolidated=False, zarr_format=3,
+                      decode_coords='all', chunks=None)
+    window = ds.isel(gs_store.tile_region_slices(config, row, col)).load()
+    return window.rio.set_spatial_dims(x_dim='longitude', y_dim='latitude').rio.write_crs('EPSG:4326')
+
+
+def refresh_unit_layers(config, row, col, layers=('GMBA_V2_ID', 'PFAF_ID', 'continent'), repo=None, log=None):
+    """Stage 0b: re-rasterize the vector unit-id layers of a STORED tile into the ancillary
+    store (one commit; the raster layers and their Earth Engine work are untouched). How a
+    unit definition changes after the ancillary exists (e.g. another HydroBASINS level);
+    the tile's partials must be re-mapped afterwards (:func:`process_tile`)."""
+    log = log or logger.info
+    repo = repo or open_ancillary_repo(config)
+    tile = config.get_tile(row, col)
+    window = open_ancillary_window(config, row, col, repo)
+    ds = window[['dem']].copy()
+    ds = add_mountain_range_and_basin_and_continent(tile, ds, log=log)
+    snap = write_ancillary_tile(config, repo, row, col, ds, layers=layers, log=log)
+    check = open_ancillary_window(config, row, col, repo)
+    for name in layers:
+        if not np.array_equal(_encode_layer(name, check[name].values), _encode_layer(name, ds[name].values)):
+            raise RuntimeError(f"tile {row},{col}: {name} did not read back as written")
+    log(f"tile {row},{col}: refreshed {layers} ({snap})")
+    return check[list(layers)]
+
+
+def fresh_blob_fs(config):
+    """See :func:`gsro_analysis.settings.fresh_blob_fs`."""
+    return settings.fresh_blob_fs(config)
 
 
 def _json_safe(value):
@@ -475,147 +605,52 @@ def sanitize_attrs(ds):
     return ds
 
 
-def save_ancillary_tile(ds, config, row, col):
-    missing = set(ANCILLARY_VARS) - set(ds.data_vars)
-    if missing:
-        raise ValueError(f"ancillary tile {row},{col} missing vars {sorted(missing)}")
-    path = ancillary_tile_path(config, row, col)
-    fs = config.azure_blob_fs
-    marker = ancillary_marker_path(config, row, col)
-    if fs.exists(marker):  # a rewrite: the old marker must not outlive the old zarr
-        fs.rm(marker)
-    if fs.exists(path):  # clear any partial previous attempt entirely
-        fs.rm(path, recursive=True)
-    fs.invalidate_cache()
-    # consolidated=False on purpose: consolidation lists the group through
-    # the (possibly stale) fsspec dircache — on 2026-08-25 that wrote a
-    # 0-member consolidated_metadata and the store read back EMPTY. Thirteen
-    # small arrays cost nothing to list at open time.
-    ds = ds.drop_vars([v for v in ('original_lat', 'original_lon') if v in ds])
-    ds = sanitize_attrs(ds)
-    ds.to_zarr(fs.get_mapper(path), mode='w', consolidated=False,
-               encoding=ancillary_encoding(ds))
-    # verify-then-mark: the marker may only follow a successful re-read of
-    # everything the tile must contain (fleet rule: no marker on failure).
-    # In-process first (fresh fs), then a fresh interpreter — see
-    # settings.verify_in_subprocess for why the in-process read can lie.
-    if not (verify_and_mark_ancillary(config, row, col)
-            or settings.verify_in_subprocess(config, 'datacube',
-                                             'verify_and_mark_ancillary', row, col)):
-        raise RuntimeError(f"tile {row},{col}: post-write verification failed "
-                           f"({path})")
-    logger.info(f"wrote {path}")
-    return path
+# ---------------------------------------------------------------------------
+# Process tiles to parquets: both stores' windows -> the 80 m UTM grid -> pixel table -> partial sums
+
+def terrain_derivatives(dem_utm):
+    """Aspect and slope (degrees) of a DEM on a metric grid (xdem, resolution from the grid)."""
+    attributes = xdem.terrain.get_terrain_attribute(dem_utm, resolution=abs(float(dem_utm.rio.resolution()[0])),
+                                                    attribute=["aspect", "slope"])
+    aspect = xr.DataArray(attributes[0], dims=dem_utm.dims, coords=dem_utm.coords)
+    slope = xr.DataArray(attributes[1], dims=dem_utm.dims, coords=dem_utm.coords)
+    return aspect, slope
 
 
-def verify_and_mark_ancillary(config, row, col):
-    """Re-read the tile's zarr through a fresh fs; if every ancillary layer is
-    present, write the completion marker and return True. Never raises."""
-    import json
-    path = ancillary_tile_path(config, row, col)
-    try:
-        fs = fresh_blob_fs(config)
-        check = xr.open_zarr(fs.get_mapper(path), decode_coords='all',
-                             chunks=None, consolidated=False, zarr_format=3)
-        missing = set(ANCILLARY_VARS) - set(check.data_vars)
-        if missing:
-            logger.warning(f"tile {row},{col}: store missing {sorted(missing)}")
-            return False
-        fs.pipe_file(ancillary_marker_path(config, row, col), json.dumps({
-            'tile': [row, col], 'grid': f"{config.version}_grid",
-            'data_vars': sorted(check.data_vars),
-        }).encode())
-        return True
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"tile {row},{col}: verification read failed: "
-                       f"{type(e).__name__}: {e}")
-        return False
+def tabulate_tile(config, row, col, ancillary_window, global_ds=None):
+    """Join one tile's runoff-onset values (any dataset version) and its ancillary window on
+    the tile's 80 m UTM grid and tabulate.
 
-
-def refresh_unit_layers(config, row, col, layers=('GMBA_V2_ID', 'PFAF_ID', 'continent')):
-    """Stage 0b: re-rasterize the vector unit-id layers of a STORED ancillary
-    tile and write them back in place (zarr ``r+``: the arrays are
-    overwritten, nothing is deleted, the marker stays valid, the raster
-    layers and their Earth Engine work are untouched). This is how a unit
-    definition changes after the ancillary exists — e.g. the switch of
-    ``PFAF_ID`` from HydroBASINS level 5 to level 6 (2026-09-03) on the
-    dry-run tiles, or a future level on the whole grid (~30 s/tile, no EE).
-    The tile's partials must be re-mapped afterwards (``process_tile``).
-    Returns the refreshed layers as a Dataset."""
-    tile = config.get_tile(row, col)
-    stored = open_ancillary_tile(config, row, col)
-    ds = stored[['dem']].copy()
-    ds = add_mountain_range_and_basin_and_continent(tile, ds)
-    new = ds[list(layers)]
-    for name in layers:
-        new[name] = new[name].round()
-        for key in ('_FillValue', 'missing_value', 'scale_factor', 'add_offset', 'dtype'):
-            new[name].attrs.pop(key, None)
-        new[name].encoding = {}
-        if name in ('GMBA_V2_ID', 'PFAF_ID'):   # nodata -> the stored fill, as tabulate expects
-            new[name] = new[name].fillna(-9999)
-    new = new.drop_vars([c for c in new.coords if c not in ('x', 'y')])
-    fs = fresh_blob_fs(config)
-    mapper = fs.get_mapper(ancillary_tile_path(config, row, col))
-    new.to_zarr(mapper, mode='r+', consolidated=False)
-    import zarr
-    group = zarr.open_group(mapper, mode='r+')
-    group.attrs['basin_atlas_layer'] = settings.BASIN_ATLAS_LAYER
-    group.attrs['unit_layers_refreshed'] = ",".join(layers)
-    fs.invalidate_cache()
-    check = open_ancillary_tile(config, row, col)
-    for name in layers:   # read back through the CF decoding tabulate uses
-        got = check[name].values
-        want = new[name].values
-        if name in ('GMBA_V2_ID', 'PFAF_ID'):
-            got = np.where(np.isfinite(got), got, -9999)
-        if not np.array_equal(np.nan_to_num(got, nan=-1), np.nan_to_num(want, nan=-1)):
-            raise RuntimeError(f"tile {row},{col}: {name} did not read back as written")
-    logger.info(f"tile {row},{col}: refreshed {layers} in place")
-    return check[list(layers)]
-
-
-def open_ancillary_tile(config, row, col):
-    # fresh fs on purpose: in a long-lived worker the shared fs can list
-    # empty after the heavy build steps (see fresh_blob_fs)
-    ds = xr.open_zarr(fresh_blob_fs(config).get_mapper(ancillary_tile_path(config, row, col)),
-                      decode_coords='all', chunks=None, consolidated=False, zarr_format=3)
-    missing = set(ANCILLARY_VARS) - set(ds.data_vars)
-    if missing:
-        raise ValueError(
-            f"ancillary tile {row},{col} is INCOMPLETE (missing {sorted(missing)}) "
-            f"— a partial write; delete its zarr and marker and let the fleet rebuild it")
-    ds = ds.drop_vars([v for v in ('original_lat', 'original_lon') if v in ds])
-    return ds.rio.write_crs(ds.attrs['utm_crs'])
-
-
-def tabulate_tile(config, row, col, ancillary_ds, global_ds=None):
-    """Join one tile's runoff-onset values (any dataset version) onto its
-    stored ancillary raster and tabulate.
-
-    Reads with mask_and_scale=True and chunks=None (per-tile reads are
-    small; CF decoding rescales runoff_onset_mad / temporal_resolution_median
-    correctly and turns -9999 into NaN before the bilinear reprojection).
-    Alignment is exact: reproject_match onto the ancillary grid, then an
-    xr.merge(join='exact') tripwire.
+    Both windows come off the dataset grid (the same pixel indices); each is reprojected onto
+    :func:`tile_utm_template` (onset, DEM, CHILI, forest cover bilinear; the categorical and
+    id layers nearest, :data:`UTM_RESAMPLING`), then slope and aspect are derived from the
+    UTM DEM. Rows are UTM pixels (~6,400 m2), so counts are area. The store is read with
+    mask_and_scale=True and chunks=None (per-tile reads are small; CF decoding rescales
+    runoff_onset_mad / temporal_resolution_median and turns -9999 into NaN before the
+    bilinear reprojection). An xr.merge(join='exact') tripwire guards the alignment.
     """
     from global_snowmelt_runoff_onset import store as gs_store
 
     if global_ds is None:
-        global_ds = config.open_runoff_onset_dataset(chunks=None,
-                                                     mask_and_scale=True)
+        global_ds = config.open_runoff_onset_dataset(chunks=None, mask_and_scale=True)
+    template = tile_utm_template(config, row, col)
     region = gs_store.tile_region_slices(config, row, col)
     tile_ds = global_ds.isel(region).drop_vars('temporal_resolution')
     tile_ds = tile_ds.astype(np.float32).compute()
 
-    onset_utm = tile_ds.rio.reproject_match(
-        ancillary_ds['dem'], resampling=rasterio.enums.Resampling.bilinear)
+    onset_utm = tile_ds.rio.reproject_match(template, resampling=rasterio.enums.Resampling.bilinear)
     onset_utm = convert_water_year_dim_to_var(onset_utm)
-    ancillary_ds = ancillary_ds.copy()
-    # exact WGS84 pixel-center coordinates of the stored UTM grid
-    ancillary_ds['original_lat'], ancillary_ds['original_lon'] = \
-        _utm_latlon_arrays(ancillary_ds['dem'])
-    joined = xr.merge([onset_utm, ancillary_ds], join='exact', compat='no_conflicts',
+
+    anc = xr.Dataset()
+    for name in ANCILLARY_LAYERS:
+        da = ancillary_window[name].astype(np.float32)
+        if name in ('GMBA_V2_ID', 'PFAF_ID'):
+            da = da.fillna(-9999.0)          # nodata as the integer sentinel tabulate expects
+        anc[name] = da.rio.write_nodata(np.nan).rio.reproject_match(template, resampling=UTM_RESAMPLING[name])
+    anc['aspect'], anc['slope'] = terrain_derivatives(anc['dem'])
+    # exact WGS84 pixel-center coordinates of the UTM grid
+    anc['original_lat'], anc['original_lon'] = _utm_latlon_arrays(anc['dem'])
+    joined = xr.merge([onset_utm, anc], join='exact', compat='no_conflicts',
                       combine_attrs='drop_conflicts')
 
     water_years = [int(y) for y in config.water_years]
@@ -652,6 +687,8 @@ def tabulate_tile(config, row, col, ancillary_ds, global_ds=None):
         df['temporal_resolution_median'].round(2).astype(np.float32))
     for c in wy_cols:
         df[c] = df[c].astype(np.int16)
+    df.attrs['utm_crs'] = str(template.rio.crs)
+    df.attrs['utm_shape'] = (int(template.sizes['y']), int(template.sizes['x']))
     return df
 
 
@@ -675,10 +712,10 @@ def save_pixel_table(df, config, row, col):
     return path
 
 
-def tabulate_and_save_tile(config, row, col, global_ds=None):
+def tabulate_and_save_tile(config, row, col, global_ds=None, repo=None):
     """Tabulate one tile and write its pixel table (opt-in product)."""
-    ancillary_ds = open_ancillary_tile(config, row, col)
-    df = tabulate_tile(config, row, col, ancillary_ds, global_ds=global_ds)
+    window = open_ancillary_window(config, row, col, repo)
+    df = tabulate_tile(config, row, col, window, global_ds=global_ds)
     return save_pixel_table(df, config, row, col)
 
 
@@ -707,7 +744,8 @@ def completed_partials_tiles(config):
     return out
 
 
-def write_partials(df, config, row, col, filter_tags=None):
+def write_partials(df, config, row, col, filter_tags=None, log=None):
+    log = log or logger.info
     """Partial sums of a tile's pixel table -> partials_tile_path() (single
     blob). Returns the number of partial rows."""
     from gsro_analysis import aggregate
@@ -718,7 +756,8 @@ def write_partials(df, config, row, col, filter_tags=None):
     path = partials_tile_path(config, row, col)
     partials.to_parquet(path, filesystem=config.azure_blob_fs, index=False,
                         compression='zstd')
-    logger.info(f"wrote {path} ({len(partials)} rows from {len(df)} pixels)")
+    log(f"tile {row},{col}: map — {len(partials):,} partial rows "
+        f"({partials['filter_tag'].nunique()} filters x {partials['unit_type'].nunique()} unit types) -> {path}")
     return len(partials)
 
 
@@ -741,10 +780,10 @@ def partials_from_pixel_table(config, row, col, filter_tags=None):
 VERSION_PRODUCTS = {
     'partials':      lambda c: f"{settings.PARTIALS_PREFIX}/{c.version}",           # fleet stage 1 (the aggregation input)
     'pixel_tables':  lambda c: f"{settings.ANALYSIS_PARQUET_PREFIX}/{c.version}",   # fleet, opt-in per-pixel parquets
-    'ancillary_grid': lambda c: f"{settings.ANCILLARY_PREFIX}/{c.version}_grid",    # fleet stage 0 (per GRID; rebuilding = Earth Engine again)
+    'ancillary_grid': lambda c: f"{settings.ANCILLARY_PREFIX}/{c.version}_grid",    # the ancillary icechunk repo (per GRID; rebuilding = Earth Engine again)
     'aggregated_mirror': lambda c: f"{settings.AGGREGATED_PREFIX}/{c.version}",    # reduce --mirror copies of the cubes
     'era5_land':     lambda c: f"{settings.ERA5_LAND_PREFIX}/{c.version}",          # the ERA5-Land icechunk repo (acquisition + anomaly group;
-                                                                                    # ERA5 Acquire rebuilds it, ~1 h) — NOT in the default reset
+                                                                                    # Get ERA5-Land data rebuilds it, ~1 h) — NOT in the default reset
 }
 FLEET_PRODUCTS = VERSION_PRODUCTS  # historical alias
 
@@ -766,7 +805,7 @@ def reset_version(config, what=('partials', 'pixel_tables', 'ancillary_grid'),
     dispatch rebuilds every tile from scratch (the dispatcher lists remaining
     work from these prefixes). Prints the plan and does NOTHING unless
     ``confirm=True``. ``'era5_land'`` must be asked for explicitly (then the
-    ERA5 Acquire workflow re-acquires every water year; its start_fresh box does the same). Never deletes the icechunk dataset,
+    'Get ERA5-Land data' workflow re-acquires every water year; its start_fresh box does the same). Never deletes the icechunk dataset,
     the pyramid, or anything outside VERSION_PRODUCTS."""
     unknown = set(what) - set(VERSION_PRODUCTS)
     if unknown:
@@ -783,25 +822,38 @@ def reset_version(config, what=('partials', 'pixel_tables', 'ancillary_grid'),
             fs.rm(prefix, recursive=True)
     fs.invalidate_cache()
     config.azure_blob_fs.invalidate_cache()
-    print("done; the next fleet dispatch rebuilds every tile in the work list")
+    print("done; the next 'Get ancillary data' / 'Process tiles to parquets' dispatch rebuilds every tile")
     return plan
 
 
 def process_tile(config, row, col, global_ds=None, keep_pixels=False,
-                 filter_tags=None):
-    """The whole per-tile job: ancillary (built only if its completion
-    marker is missing) -> in-memory pixel table -> partial sums written to
-    partials_tile_path(); the pixel table itself is written only with
-    ``keep_pixels``. Failure = exception = no partials blob (the fleet rule).
-    Returns (n_pixels, n_partial_rows)."""
-    if not ancillary_tile_complete(config, row, col):
-        ds = build_ancillary_tile(config, row, col)
-        save_ancillary_tile(ds, config, row, col)
-    ancillary_ds = open_ancillary_tile(config, row, col)
-    df = tabulate_tile(config, row, col, ancillary_ds, global_ds=global_ds)
+                 filter_tags=None, log=None, repo=None):
+    """The whole per-tile job of 'Process tiles to parquets': the ancillary window (must have
+    a commit) and the store window -> the 80 m UTM grid -> pixel table -> partial sums
+    written to partials_tile_path(); the pixel table itself only with ``keep_pixels``.
+    Failure = exception = no partials blob (the fleet rule). ``log`` (default: the module
+    logger) receives one line per step. Returns (n_pixels, n_partial_rows)."""
+    log = log or logger.info
+    repo = repo or open_ancillary_repo(config)
+    if not ancillary_tile_complete(config, row, col, repo):
+        raise RuntimeError(f"tile {row},{col}: no ancillary commit in {ancillary_repo_prefix(config)}: "
+                           "run the 'Get ancillary data' workflow first")
+    t0 = time.time()
+    window = open_ancillary_window(config, row, col, repo)
+    log(f"tile {row},{col}: ancillary window read from the dataset-grid store "
+        f"({window.sizes['latitude']} x {window.sizes['longitude']} px, {len(ANCILLARY_LAYERS)} layers) "
+        f"({time.time() - t0:.0f}s)")
+    t1 = time.time()
+    df = tabulate_tile(config, row, col, window, global_ds=global_ds)
+    shape = df.attrs.get('utm_shape', ('?', '?'))
+    log(f"tile {row},{col}: tabulate: store window ({len(config.water_years)} water years + medians) and "
+        f"ancillary window reprojected onto the {df.attrs.get('utm_crs')} 80 m grid "
+        f"({shape[0]} x {shape[1]} px), slope + aspect derived, {len(df):,} pixels with a valid median "
+        f"({time.time() - t1:.0f}s)")
     if keep_pixels:
         save_pixel_table(df, config, row, col)
-    n_rows = write_partials(df, config, row, col, filter_tags=filter_tags)
+        log(f"tile {row},{col}:   pixel table written -> {parquet_tile_path(config, row, col)}")
+    n_rows = write_partials(df, config, row, col, filter_tags=filter_tags, log=log)
     return len(df), n_rows
 
 

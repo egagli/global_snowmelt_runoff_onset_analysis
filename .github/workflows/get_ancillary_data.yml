@@ -1,41 +1,33 @@
-name: Pipeline Fleet
+name: Get ancillary data
 
-# Stages 0+1 of the analysis pipeline (ancillary + tabulate -> per-tile
-# PARTIAL SUMS) as an embarrassingly-parallel GitHub Actions fleet — the
-# production repo's icechunk fleet pattern (docs/icechunk-github-actions-pattern.md)
-# adapted to blob-existence ledgers:
-#   stage 0 done = marker in ancillary/<grid>/_complete/   (flat, 1 list call)
-#   stage 1 done = tile partials parquet blob exists       (atomic single blob)
-# The per-pixel parquet is an opt-in product (keep_pixels) — the reduce
-# (pipeline/scripts/reduce_partials.py, local) needs only the partials.
-# Failure = no output = re-listed on the next dispatch; re-dispatch until the
-# plan job reports 0 remaining. ~4,320 tiles, <= 256 matrix jobs per run.
-#
-# Runs on the GitHub-hosted runners of this public repository with the repository
-# secrets AZURE_STORAGE_SAS_TOKEN, AZURE_STORAGE_ACCOUNT and EE_SERVICE_ACCOUNT_KEY
-# (workflow_dispatch only; forks never receive them). One fleet run per config
-# file at a time (concurrency group): two overlapping runs would race on the
-# same tile blobs. The production repo is checked out at a pinned commit.
+# Wave 2 of a dataset version (after 'Get ERA5-Land data', before 'Process tiles to parquets'):
+# the eight static ancillary layers of every tile (Copernicus DEM, CHILI from Earth Engine, snow
+# class, WorldCover, forest cover, GMBA / HydroBASINS level-6 / continent ids), resampled onto
+# the tile's window of the DATASET grid and committed to ONE icechunk repository per grid
+# generation (pipeline/scripts/build_ancillary_batch.py; layout in gsro_analysis/datacube.py).
+# The plan job creates the repository if it does not exist, folds its commit history and lists
+# the tiles without a commit; each matrix job builds one batch, one commit per tile. Failure =
+# no commit = re-listed next dispatch; re-dispatch until the plan job reports 0 remaining.
+# `start_fresh` (off by default) DELETES the version's ancillary repository first: the only
+# deletion this workflow can make. Runs on the GitHub-hosted runners of this public repository
+# with the repository secrets AZURE_STORAGE_SAS_TOKEN, AZURE_STORAGE_ACCOUNT and
+# EE_SERVICE_ACCOUNT_KEY; the production repo is checked out at a pinned commit.
+
 on:
   workflow_dispatch:
     inputs:
       batch_size:
-        description: 'Tiles per matrix job'
+        description: 'Tiles per matrix job (~2.5 min per tile)'
         required: false
         default: '36'
-        type: string
-      max_batches:
-        description: 'Cap batches this run (0 = no cap; 1 = smoke test)'
-        required: false
-        default: '0'
         type: string
       config_file:
         description: 'Config file (resolved inside the production clone)'
         required: false
         default: 'config/global_config_v10.txt'
         type: string
-      keep_pixels:
-        description: 'Also write the per-pixel parquet per tile (opt-in, ~150 GB for the grid)'
+      start_fresh:
+        description: 'DELETE this version''s ancillary repository first, then rebuild every tile (Earth Engine again)'
         required: false
         default: false
         type: boolean
@@ -43,12 +35,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: fleet-${{ inputs.config_file }}
+  group: ancillary-${{ inputs.config_file }}
   cancel-in-progress: false
 
 env:
-  PYTHONUNBUFFERED: "1"   # keep stdout/stderr interleaved in job logs
-  # the production package (Config, store access, plot_utils) is pinned to a commit, never a
+  PYTHONUNBUFFERED: "1"
+  # the production package (Config, store access, provenance) is pinned to a commit, never a
   # branch: that repository is read-only from here. Mirrored in the pixi.toml comment.
   PRODUCTION_REPO_SHA: 18992fa7018d517a23f5507b28ec80edba2d0482
   AZURE_STORAGE_SAS_TOKEN: ${{ secrets.AZURE_STORAGE_SAS_TOKEN }}
@@ -57,7 +49,7 @@ env:
 jobs:
   plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60    # a start_fresh reset deletes the whole repository
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       count: ${{ steps.plan.outputs.count }}
@@ -80,28 +72,34 @@ jobs:
           environments: ci
           cache: true
 
-      - name: Derive remaining work from the blob ledger
+      - name: Restore vector-source cache (continents, for the template attrs)
+        uses: actions/cache@v4
+        with:
+          path: global_snowmelt_runoff_onset_analysis/data/geometries/sources
+          key: vector-sources-v1
+
+      - name: Create the ancillary repository if missing, fold its ledger, list the tiles without a commit
         id: plan
         working-directory: global_snowmelt_runoff_onset_analysis
         run: |
-          pixi run -e ci python pipeline/scripts/get_remaining_work.py \
+          pixi run -e ci python pipeline/scripts/get_remaining_work.py --stage ancillary \
             --config "${{ inputs.config_file }}" \
             --batch-size "${{ inputs.batch_size }}" \
-            --max-batches "${{ inputs.max_batches }}" \
-            --manifest-out "$GITHUB_WORKSPACE/fleet_manifest.json"
+            --manifest-out "$GITHUB_WORKSPACE/fleet_manifest.json" \
+            ${{ inputs.start_fresh && '--start-fresh' || '' }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: fleet-manifest
+          name: ancillary-manifest
           path: fleet_manifest.json
 
-  process:
+  build:
     needs: plan
     if: fromJson(needs.plan.outputs.count) > 0
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
-      fail-fast: false        # one bad tile must not kill the fleet
+      fail-fast: false        # one bad tile must not kill the wave
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     env:
       MALLOC_ARENA_MAX: "2"   # cap glibc arena creep on long multi-tile jobs
@@ -138,13 +136,12 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: fleet-manifest
+          name: ancillary-manifest
 
-      - name: Process batch ${{ matrix.batch_index }}
+      - name: Build batch ${{ matrix.batch_index }}
         working-directory: global_snowmelt_runoff_onset_analysis
         run: |
-          pixi run -e ci python pipeline/scripts/run_fleet_batch.py \
+          pixi run -e ci python pipeline/scripts/build_ancillary_batch.py \
             --config "${{ inputs.config_file }}" \
             --manifest "$GITHUB_WORKSPACE/fleet_manifest.json" \
-            --batch ${{ matrix.batch_index }} \
-            ${{ inputs.keep_pixels && '--keep-pixels' || '' }}
+            --batch ${{ matrix.batch_index }}

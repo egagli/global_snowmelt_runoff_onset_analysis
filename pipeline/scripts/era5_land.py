@@ -1,4 +1,4 @@
-"""The ERA5-Land store operations — the ERA5 Acquire workflow's entry point, equally
+"""The ERA5-Land store operations — the 'Get ERA5-Land data' workflow's entry point, equally
 runnable locally (see gsro_analysis/era5.py for the layout and the ledger).
 
   era5_land.py init    [--start-fresh]      create the version's repository with the empty template

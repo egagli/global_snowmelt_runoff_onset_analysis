@@ -1,0 +1,131 @@
+name: Process tiles to parquets
+
+# Wave 3 of a dataset version (after 'Get ancillary data'): per tile, the dataset store's window
+# and the ancillary store's window are reprojected onto the tile's 80 m UTM grid, the pixels are
+# tabulated and the tile's PARTIAL SUMS parquet is written (pipeline/scripts/process_tiles_batch.py
+# -> datacube.process_tile); the per-pixel parquet is opt-in (keep_pixels). The plan job lists the
+# tiles with an ancillary commit and without a partials blob; tiles without an ancillary commit are
+# never dispatched. Failure = no output = re-listed next dispatch; re-dispatch until the plan job
+# reports 0 remaining. `start_fresh` (off by default) DELETES the version's partials and pixel
+# tables first: the only deletion this workflow can make. No Earth Engine: every external source is
+# already in the ancillary store. Runs on the GitHub-hosted runners of this public repository with
+# the repository secrets AZURE_STORAGE_SAS_TOKEN and AZURE_STORAGE_ACCOUNT.
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: 'Tiles per matrix job (~1 min per tile)'
+        required: false
+        default: '72'
+        type: string
+      config_file:
+        description: 'Config file (resolved inside the production clone)'
+        required: false
+        default: 'config/global_config_v10.txt'
+        type: string
+      keep_pixels:
+        description: 'Also write the per-pixel parquet per tile (opt-in, ~150 GB for the grid)'
+        required: false
+        default: false
+        type: boolean
+      start_fresh:
+        description: 'DELETE this version''s partials and pixel tables first, then re-map every tile'
+        required: false
+        default: false
+        type: boolean
+permissions:
+  contents: read
+
+concurrency:
+  group: partials-${{ inputs.config_file }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PRODUCTION_REPO_SHA: 18992fa7018d517a23f5507b28ec80edba2d0482
+  AZURE_STORAGE_SAS_TOKEN: ${{ secrets.AZURE_STORAGE_SAS_TOKEN }}
+  AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: global_snowmelt_runoff_onset_analysis
+
+      - name: Checkout production repo (side-by-side, required by the pixi env and Config; pinned commit)
+        uses: actions/checkout@v4
+        with:
+          repository: egagli/global_snowmelt_runoff_onset
+          ref: ${{ env.PRODUCTION_REPO_SHA }}
+          path: global_snowmelt_runoff_onset
+
+      - uses: prefix-dev/setup-pixi@v0.8.0
+        with:
+          pixi-version: v0.65.0
+          manifest-path: global_snowmelt_runoff_onset_analysis/pixi.toml
+          environments: ci
+          cache: true
+
+      - name: Fold the ancillary ledger and the partials ledger, list the tiles to map
+        id: plan
+        working-directory: global_snowmelt_runoff_onset_analysis
+        run: |
+          pixi run -e ci python pipeline/scripts/get_remaining_work.py --stage partials \
+            --config "${{ inputs.config_file }}" \
+            --batch-size "${{ inputs.batch_size }}" \
+            --manifest-out "$GITHUB_WORKSPACE/fleet_manifest.json" \
+            ${{ inputs.start_fresh && '--start-fresh' || '' }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: partials-manifest
+          path: fleet_manifest.json
+
+  process:
+    needs: plan
+    if: fromJson(needs.plan.outputs.count) > 0
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      MALLOC_ARENA_MAX: "2"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: global_snowmelt_runoff_onset_analysis
+
+      - name: Checkout production repo (side-by-side, required by the pixi env and Config; pinned commit)
+        uses: actions/checkout@v4
+        with:
+          repository: egagli/global_snowmelt_runoff_onset
+          ref: ${{ env.PRODUCTION_REPO_SHA }}
+          path: global_snowmelt_runoff_onset
+
+      - uses: prefix-dev/setup-pixi@v0.8.0
+        with:
+          pixi-version: v0.65.0
+          manifest-path: global_snowmelt_runoff_onset_analysis/pixi.toml
+          environments: ci
+          cache: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: partials-manifest
+
+      - name: Process batch ${{ matrix.batch_index }}
+        working-directory: global_snowmelt_runoff_onset_analysis
+        run: |
+          pixi run -e ci python pipeline/scripts/process_tiles_batch.py \
+            --config "${{ inputs.config_file }}" \
+            --manifest "$GITHUB_WORKSPACE/fleet_manifest.json" \
+            --batch ${{ matrix.batch_index }} \
+            ${{ inputs.keep_pixels && '--keep-pixels' || '' }}
