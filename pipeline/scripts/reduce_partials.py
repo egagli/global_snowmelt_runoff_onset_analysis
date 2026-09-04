@@ -73,6 +73,29 @@ def sync_partials(config, cache_dir, workers=16):
     return sorted(cache_dir / f for f in remote)
 
 
+# the partials' key columns: every row is one tile's contribution to one cube cell
+KEY_COLS = ['filter_tag', 'unit_type', 'unit_id', 'elevation', 'aspect', 'latitude', 'chili_class']
+
+
+def load_partials_summed(files, batch=200):
+    """Read the tiles' partials and SUM them over tiles as they are read (groupby-sum per
+    batch of files, then over the batches). The reduce is a sum over identical keys, so the
+    result is the same as concatenating every row first, at a fraction of the memory: the
+    4,320 v10 tiles hold ~14 M rows x 85 float64 columns (~10 GB concatenated; the 15 GB
+    dev box was OOM-killed on 2026-09-04) but only as many summed rows as there are populated
+    cube cells. ``min_count=1`` keeps a column NaN when no tile reported it (the same rule
+    aggregate.reduce_partials applies). Returns (summed frame, number of raw rows)."""
+    acc, n_rows = None, 0
+    for i in range(0, len(files), batch):
+        chunk = pd.concat((pd.read_parquet(f) for f in files[i:i + batch]), ignore_index=True)
+        n_rows += len(chunk)
+        chunk = chunk.drop(columns=[c for c in ('tile_row', 'tile_col') if c in chunk])
+        summed = chunk.groupby(KEY_COLS, sort=False, dropna=False).sum(min_count=1)
+        acc = summed if acc is None else pd.concat([acc, summed]).groupby(level=KEY_COLS, sort=False, dropna=False).sum(min_count=1)
+        del chunk, summed
+    return acc.reset_index(), n_rows
+
+
 def encoding_for(ds):
     enc = {}
     for v in ds.data_vars:
@@ -96,9 +119,9 @@ def main():
         files = sync_partials(config, cache_dir)
     if not files:
         sys.exit(f"no partials for {version} under {settings.PARTIALS_PREFIX}/{version}")
-    partials = pd.concat((pd.read_parquet(f) for f in files), ignore_index=True)
-    tiles = partials[['tile_row', 'tile_col']].drop_duplicates()
-    print(f"loaded {len(partials):,} partial rows from {len(tiles)} tiles "
+    partials, n_rows = load_partials_summed(files)
+    n_tiles = len(files)
+    print(f"summed {n_rows:,} partial rows from {n_tiles} tiles into {len(partials):,} cube cells "
           f"({time.time() - t0:.0f}s)", flush=True)
 
     present = set(partials['filter_tag'].unique())
@@ -147,7 +170,7 @@ def main():
                 z = zonal[group].rename({'PFAF_ID': 'river_basin'})
                 z = z.sel(river_basin=z['river_basin'].isin(ds['river_basin'].values))
                 ds = xr.merge([ds, z], combine_attrs='drop_conflicts', join='left')
-            ds.attrs.update({'dataset_version': version, 'n_tiles': int(len(tiles)),
+            ds.attrs.update({'dataset_version': version, 'n_tiles': int(n_tiles),
                              'produced_by': 'pipeline/scripts/reduce_partials.py'})
             out = paths.aggregate(group, version, tag)
             out.parent.mkdir(parents=True, exist_ok=True)

@@ -529,8 +529,11 @@ def _encode_layer(name, values):
     nodata -> the encoded fill)."""
     e = ANCILLARY_ENCODING[name]
     v = np.asarray(values, dtype='float64')
+    v = np.where(v == -9999, np.nan, v)                  # the builders' integer nodata sentinel
     if 'scale_factor' in e:
         v = (v - e.get('add_offset', 0.0)) / e['scale_factor']
+    info = np.iinfo(e['dtype'])
+    v = np.where((v < info.min) | (v > info.max), np.nan, v)   # never let a value wrap (int8 -9999 -> -15, 2026-09-04)
     out = np.where(np.isfinite(v), np.round(v), e['_FillValue'])
     return out.astype(e['dtype'])
 
@@ -578,6 +581,9 @@ def open_ancillary_window(config, row, col, repo=None, local_store=None):
     ds = xr.open_zarr(repo.readonly_session(ledger.BRANCH).store, consolidated=False, zarr_format=3,
                       decode_coords='all', chunks=None)
     window = ds.isel(gs_store.tile_region_slices(config, row, col)).load()
+    # a continent code below 0 is nodata: tiles built before 2026-09-04 stored the -9999 "no polygon"
+    # fill wrapped to -15 in int8 (see _encode_layer)
+    window['continent'] = window['continent'].where(window['continent'] >= 0)
     return window.rio.set_spatial_dims(x_dim='longitude', y_dim='latitude').rio.write_crs('EPSG:4326')
 
 
@@ -784,8 +790,11 @@ def write_partials(df, config, row, col, filter_tags=None, log=None):
     path = partials_tile_path(config, row, col)
     partials.to_parquet(path, filesystem=config.azure_blob_fs, index=False,
                         compression='zstd')
-    log(f"tile {row},{col}: map — {len(partials):,} partial rows "
-        f"({partials['filter_tag'].nunique()} filters x {partials['unit_type'].nunique()} unit types) -> {path}")
+    if len(partials):
+        log(f"tile {row},{col}: map — {len(partials):,} partial rows "
+            f"({partials['filter_tag'].nunique()} filters x {partials['unit_type'].nunique()} unit types) -> {path}")
+    else:   # a verified-empty tile (no pixel with a valid median passed the filters): the empty blob IS the result
+        log(f"tile {row},{col}: map — 0 partial rows (no pixel with a valid median) -> empty {path}")
     return len(partials)
 
 

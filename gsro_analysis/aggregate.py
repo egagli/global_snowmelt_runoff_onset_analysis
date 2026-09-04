@@ -366,9 +366,19 @@ def reduce_partials(partials, group, filter_tag, water_years):
                              "latitude", "chili_class", "unit_id", "tile_row", "tile_col")]
     sums = sel.groupby(keys, sort=True)[num_cols].sum(min_count=1).reset_index()
 
+    off_axis = {}
     if unit_type == "continents":
         names = sums["unit_id"].map(CONTINENTS_ENUM).map(lambda n: CONTINENT_MERGE.get(n, n))
-        sums["unit_id"] = names
+        # pixels outside the six study continents are dropped here, counted and recorded:
+        # Antarctica (the dataset's southern edge nicks the peninsula) and any nodata code
+        # (a tile without a continent polygon stored -9999, once wrapped to -15 in int8)
+        off = ~names.isin(CONTINENT_NAMES)
+        if off.any():
+            off_axis = {str(CONTINENTS_ENUM.get(int(u), f"code {int(u)}")): int(n)
+                        for u, n in sums.loc[off].groupby("unit_id")["n"].sum().items()}
+            print(f"  continents: dropping pixels outside the six-continent axis: {off_axis}", flush=True)
+            sums, names = sums.loc[~off], names.loc[~off]
+        sums = sums.assign(unit_id=names.values)
         sums = sums.groupby(keys, sort=True)[num_cols].sum(min_count=1).reset_index()
 
     # the continent axis is the fixed six-continent set (empty ones stay NaN)
@@ -472,6 +482,8 @@ def reduce_partials(partials, group, filter_tag, water_years):
         ds.attrs["hydrobasins_level"] = gspec["basin_level"]
         ds.attrs["hydrobasins_level_stored"] = BASIN_LEVEL_STORED
         ds["river_basin"].attrs["long_name"] = f"HydroBASINS level-{gspec['basin_level']} PFAF_ID"
+    if off_axis:
+        ds.attrs["dropped_pixels_outside_continent_axis"] = str(off_axis)
     dropped = [b for b in UNIT_TYPES[unit_type]["bins"] if b not in spec["bins"]]
     if dropped:
         ds.attrs["summed_out_bins"] = ",".join(dropped)
@@ -618,7 +630,9 @@ def finalize_mountain_ranges(ds, gmba_gdf, continents_gdf, era5_zonal_ds=None):
         continent=("mountain_range", meta["continent"].values.astype(str)),
     ).assign_coords(mountain_range=meta["name"].values.astype(str)).sortby("mountain_range")
     if era5_zonal_ds is not None:
-        z = era5_zonal_ds.sel(GMBA_V2_ID=ds["GMBA_V2_ID"].values, drop=False)
+        # reindex, not sel: a range whose polygon the zonal join skipped (SKIP_RANGES, e.g. the
+        # South Atlantic Islands on 2026-09-04) still has pixels in the cube and gets NaN climate
+        z = era5_zonal_ds.reindex(GMBA_V2_ID=ds["GMBA_V2_ID"].values)
         z = z.rename({"GMBA_V2_ID": "mountain_range"}).assign_coords(
             mountain_range=ds["mountain_range"].values)
         ds = xr.merge([ds, z.drop_vars([c for c in z.coords if c not in ("mountain_range", "water_year", "month")])],

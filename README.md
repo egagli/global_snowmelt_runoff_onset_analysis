@@ -11,6 +11,12 @@ Dataset creation, evaluation and the interactive map live in the companion repo
 [egagli/global_snowmelt_runoff_onset](https://github.com/egagli/global_snowmelt_runoff_onset), whose
 package this one imports for the dataset store, the configuration and the shared plot styling.
 
+Two private companions, needed for nothing here:
+[egagli/global_snowmelt_runoff_onset_paper](https://github.com/egagli/global_snowmelt_runoff_onset_paper)
+holds the notes, history and writing behind these analyses and the provenance of the frozen `v9` renders;
+[egagli/recreate_global_snowmelt_runoff_onset_analysis_QGIS_figures_in_mpl](https://github.com/egagli/recreate_global_snowmelt_runoff_onset_analysis_QGIS_figures_in_mpl)
+holds the QGIS project the two inset world maps were transferred from and the sweeps their published renders embedded.
+
 ## Setup
 
 The production repo is cloned **side-by-side** (the pixi environment editable-installs it from
@@ -131,7 +137,7 @@ applies the analyses' rules in one call.
 3. **3. Process tiles to parquets**: maps every tile that has an ancillary commit and no partials blob
    (`start_fresh` deletes the partials and pixel tables first). Re-dispatch until 0 remaining. Each job
    logs one line per step per tile.
-4. **Local stages**: `pixi run era5-zonal`, `pixi run reduce` (add `-- --mirror` to copy the cubes to
+4. **Local stages**: `pixi run era5-zonal`, `pixi run reduce` (add `--mirror` to copy the cubes to
    Azure), `pixi run metrics`.
 5. **Notebooks**: see [analyses/README.md](analyses/README.md); the two composite world maps build their
    own inset sweeps.
