@@ -11,12 +11,6 @@ Dataset creation, evaluation and the interactive map live in the companion repo
 [egagli/global_snowmelt_runoff_onset](https://github.com/egagli/global_snowmelt_runoff_onset), whose
 package this one imports for the dataset store, the configuration and the shared plot styling.
 
-Two private companions, needed for nothing here:
-[egagli/global_snowmelt_runoff_onset_paper](https://github.com/egagli/global_snowmelt_runoff_onset_paper)
-holds the notes, history and writing behind these analyses and the provenance of the frozen `v9` renders;
-[egagli/recreate_global_snowmelt_runoff_onset_analysis_QGIS_figures_in_mpl](https://github.com/egagli/recreate_global_snowmelt_runoff_onset_analysis_QGIS_figures_in_mpl)
-holds the QGIS project the two inset world maps were transferred from and the sweeps their published renders embedded.
-
 ## Setup
 
 The production repo is cloned **side-by-side** (the pixi environment editable-installs it from
@@ -170,6 +164,15 @@ exists in a `results/<version>/` table stamped with `_git_sha` (production packa
 gitignored; figure styling follows the production `plot_utils` conventions; notebook outputs are
 stripped by `nbstripout`. Nothing on Azure is deleted by the code except `datacube.reset_version`, which
 is a dry run until confirmed.
+
+## Sibling repos  
+Two private companions, needed for nothing here:
+[egagli/global_snowmelt_runoff_onset_paper](https://github.com/egagli/global_snowmelt_runoff_onset_paper)
+holds the notes, history and writing behind these analyses and the provenance of the frozen `v9` renders;
+[egagli/recreate_global_snowmelt_runoff_onset_analysis_QGIS_figures_in_mpl](https://github.com/egagli/recreate_global_snowmelt_runoff_onset_analysis_QGIS_figures_in_mpl)
+holds the QGIS project the two inset world maps were transferred from and the sweeps their published renders embedded.  
+
+**In this repository, I've used Claude Code to reorganize, streamline, and reimplement my initial global analysis (carried out in chapters 4-5 of my [PhD dissertation](https://digital.lib.washington.edu/researchworks/items/857905b7-12e7-45a0-9792-f710f46b169c)) of the [global_snowmelt_runoff_onset](https://github.com/egagli/global_snowmelt_runoff_onset) dataset.**    
 
 License: MIT (`LICENSE`). When using these analyses, cite the dataset publication (`CITATION.cff`):
 

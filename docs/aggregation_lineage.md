@@ -253,7 +253,7 @@ Engine work recurs.
 
 ## Design note: the ancillary as one icechunk repository on the dataset grid (raised 2026-09-03; storage adopted 2026-09-04, tabulation stays UTM)
 
-Considered and deferred: replacing the per-tile UTM ancillary zarrs with ONE icechunk repository on the
+The proposal (2026-09-03): replace the per-tile UTM ancillary zarrs with ONE icechunk repository on the
 dataset's own geographic grid (EPSG:4326, 0.00072°, 204,800 × 499,998 pixels, one shard per 2048 × 2048 tile
 per layer), the layout the ERA5-Land store and the production dataset store already use.
 
