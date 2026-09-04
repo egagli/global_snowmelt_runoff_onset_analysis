@@ -78,7 +78,15 @@ def add_dem(tile, ds):
     catalog = pystac_client.Client.open("https://planetarycomputer.microsoft.com/api/stac/v1",
                                         modifier=planetary_computer.sign_inplace)
     search = catalog.search(collections=["cop-dem-glo-30"], intersects=tile.geobox.geographic_extent)
-    dem_da = odc.stac.load(items=search.items(), like=ds, chunks={}, resampling='bilinear')['data'].squeeze()
+    items = list(search.items())
+    if not items:
+        # the source's own definitive no-data signal (build_ancillary_window fills the layer with nodata):
+        # the public GLO-30 release has no tiles over Armenia and Azerbaijan (work-list tiles 29,152 /
+        # 29,153 / 29,154 on 2026-09-04) — such a tile contributes no elevation-binned statistics
+        from rioxarray.exceptions import NoDataInBounds
+        raise NoDataInBounds("Copernicus DEM GLO-30: no STAC items intersect the tile "
+                             "(open water, or the Armenia/Azerbaijan exclusion of the public release)")
+    dem_da = odc.stac.load(items=items, like=ds, chunks={}, resampling='bilinear')['data'].squeeze()
     dem_da = dem_da.rio.write_nodata(-32767, encoded=True).drop_vars('time')
     ds['dem'] = dem_da.compute()
     return ds
@@ -426,6 +434,26 @@ def ancillary_tile_complete(config, row, col, repo=None):
     return (row, col) in completed_ancillary_tiles(config, repo)
 
 
+def _with_transient_retries(fn, *args, log=None, tries=3, delays=(20, 60), **kwargs):
+    """Call a layer fetch, retrying only on the transient failures of the remote catalogs
+    (a Planetary Computer STAC gateway error page, a dropped connection): two of six wave-2
+    batches lost one tile each to a ~03:00 UTC blip on 2026-09-04. Anything else raises at
+    once; after ``tries`` the transient error raises too (failure = no commit)."""
+    import requests
+    import pystac_client.exceptions
+    transient = (pystac_client.exceptions.APIError, requests.exceptions.RequestException,
+                 ConnectionError, TimeoutError)
+    for attempt in range(tries):
+        try:
+            return fn(*args, **kwargs)
+        except transient as e:
+            if attempt == tries - 1:
+                raise
+            delay = delays[min(attempt, len(delays) - 1)]
+            (log or logger.warning)(f"{fn.__name__}: transient {type(e).__name__}, retry {attempt + 2}/{tries} in {delay}s")
+            time.sleep(delay)
+
+
 def build_ancillary_window(config, row, col, mask_nodata=True, log=None):
     """The tile's eight source layers on its window of the DATASET grid (wave 'Get ancillary
     data'). Failure policy (fleet rule: failure = no output, never wrong output): a raster
@@ -464,7 +492,7 @@ def build_ancillary_window(config, row, col, mask_nodata=True, log=None):
         straddles = coverage is not None and (tile_south < coverage[0] or tile_north > coverage[1])
         t0 = time.time()
         try:
-            ds = fn(*args, **kwargs)
+            ds = _with_transient_retries(fn, *args, log=log, **kwargs)
         except NoDataInBounds as e:  # the source's own definitive empty signal
             _fill(layers, f"{fn.__name__}: {e}")
         except Exception as e:
