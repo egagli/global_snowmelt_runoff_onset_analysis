@@ -1,4 +1,4 @@
-name: Process tiles to parquets
+name: "3. Process tiles to parquets"
 
 # Wave 3 of a dataset version (after 'Get ancillary data'): per tile, the dataset store's window
 # and the ancillary store's window are reprojected onto the tile's 80 m UTM grid, the pixels are

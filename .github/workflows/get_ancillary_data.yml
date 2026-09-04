@@ -1,4 +1,4 @@
-name: Get ancillary data
+name: "2. Get ancillary data"
 
 # Wave 2 of a dataset version (after 'Get ERA5-Land data', before 'Process tiles to parquets'):
 # the eight static ancillary layers of every tile (Copernicus DEM, CHILI from Earth Engine, snow

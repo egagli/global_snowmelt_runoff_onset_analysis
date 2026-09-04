@@ -1,4 +1,4 @@
-name: Get ERA5-Land data
+name: "1. Get ERA5-Land data"
 
 # The ERA5-Land store of one dataset version (pipeline/scripts/era5_land.py; layout and
 # ledger in gsro_analysis/era5.py): ONE icechunk repository per version, initialized as an

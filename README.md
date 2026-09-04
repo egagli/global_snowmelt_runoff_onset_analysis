@@ -124,11 +124,11 @@ applies the analyses' rules in one call.
 
 ## Running a dataset version
 
-1. **Get ERA5-Land data**: no inputs needed; it creates the version's store if missing, fetches only the
+1. **1. Get ERA5-Land data** (the Actions tab lists the three workflows in this order): no inputs needed; it creates the version's store if missing, fetches only the
    water years without a commit, then builds the anomaly group (`start_fresh` deletes the store first).
-2. **Get ancillary data**: creates the grid generation's ancillary store if missing and builds every tile
+2. **2. Get ancillary data**: creates the grid generation's ancillary store if missing and builds every tile
    without a commit (`start_fresh` deletes the store first). Re-dispatch until the plan job reports 0.
-3. **Process tiles to parquets**: maps every tile that has an ancillary commit and no partials blob
+3. **3. Process tiles to parquets**: maps every tile that has an ancillary commit and no partials blob
    (`start_fresh` deletes the partials and pixel tables first). Re-dispatch until 0 remaining. Each job
    logs one line per step per tile.
 4. **Local stages**: `pixi run era5-zonal`, `pixi run reduce` (add `-- --mirror` to copy the cubes to
