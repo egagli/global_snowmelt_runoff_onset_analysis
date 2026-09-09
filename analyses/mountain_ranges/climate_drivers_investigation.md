@@ -758,3 +758,199 @@ while sharpening the aspect contrast. And deeper March SWE flattens the gradient
 does not see) or in the snow distribution (a thin, energy-limited year exposes topography in both dimensions) rather than
 in the seasonal-mean forcing. The onset-window daily indices and cloud fraction of section 11.2 are the data to test it
 with; the joint lapse–amplitude anomaly per range-year is the response variable.
+
+---
+
+## 14. Synthesis (2026-09-09): synoptic vs gradual springs, the literature, Evan & Eisenman tested, and the aspect-by-elevation view
+
+Scripts: `scratch/climate_drivers/j_evan_eisenman_test.py` (→ `evan_eisenman_cross_range.csv`),
+`k_aspect_by_elevation_profile.py` (→ `figures/aspect_by_elevation_profiles.png`), `variance_vs_sensitivity.csv` (from an
+inline check). Literature read from `../global_snowmelt_runoff_onset_analysis_paper/literature/` (abstracts extracted
+with pypdf; the folder's `paper/notes_literature.md` already argues for the radiative-vs-advective framing).
+
+### 14.1 The interpretation, and its precedent in Lundquist et al.
+
+The section-13 result (a year's lapse rate and aspect amplitude co-vary within a range, r ≈ +0.26, and off-axis phase
+years are flat years) reads as: **when a spring is set by a synoptic event, melt begins nearly everywhere at once and
+neither elevation nor aspect gets to act; when the spring is quiet and melt progresses gradually, insolation paces it
+and both the elevation gradient and the aspect contrast are at their largest.** That is Lundquist, Cayan & Dettinger
+(2004, *J. Hydrometeorol.* 5, 327) in interannual, range-scale, global form: in their Sierra Nevada record, "synchronous
+springs" (a late-winter trough followed by a strong ridge and a > 12 °C rise in five days; 8 of 87 years) start streamflow
+at all elevations and on north- and south-facing cirques together, while in the most elevation-dependent years
+"periods of little or no storm activity … precede the onset of spring snowmelt, allowing elevation and aspect to
+influence snowmelt as spring arrives gradually". Our data extend this from one range and streamflow to 103 ranges
+and 80 m onset, with the lapse rate and the aspect amplitude as the two measured axes of "elevation and aspect
+influence".
+
+Lundquist & Flint (2006, *J. Hydrometeorol.* 7, 1199) is a different mechanism and should be kept distinct: the March
+2004 event melted before the equinox, at low sun, so *shading* mattered more than in a late-March event of equal warmth
+(2002). That is a sun-angle-at-melt-time effect, the one our seasonal arc (the continents' sunny–shaded difference vs
+median onset) documents climatologically. Interannually the two mechanisms pull in opposite directions in an early
+year: lower sun (more aspect contrast) versus synoptic forcing (less). The data show which wins where: pooled over all
+ranges the year's amplitude is unrelated to the year's onset anomaly (r = −0.04), but in the Sierra Nevada it is −0.63
+(earlier years, larger aspect contrast: Lundquist & Flint in their own range) and in the Hindu Kush −0.44, while in the
+Alps it is −0.02 and in the Pamir +0.28. Both citations belong in the paper, attached to different sentences.
+
+Also relevant, from the folder: Rhoades et al. (2026, *Sci. Adv.*, "snow-eater heat waves") characterise the synoptic
+trigger itself for the western US (3–5-day events, three to five per melt season, doubling melt rates, increasing in area
+and frequency and shifting earlier since the 1850s) — the natural citation for what a "flat year" is made of, and for
+the warming-implication sentence (more flat years, not only earlier ones). Pflug & Lundquist (2020) show that the
+*spatial pattern* of snow is repeatable between years while its amplitude is not, which is the snow-side analogue of our
+finding that the aspect *direction* is stable (circular SD 19°) while the aspect *amplitude* varies by a third.
+
+### 14.2 What the draft says now, and what to change
+
+The draft (`paper/drafts/draft_4_yet_another_version.md`) already has the idea qualitatively: "These are cases in which
+large-scale atmospheric forcing overwhelms typical local controls and produces near-synchronous shifts across elevation
+and aspect" (citing Lundquist 2004) and, in Results, "synoptic-scale forcing produces spatially coherent, regional
+events that can overwhelm typical local controls". What it lacks is the quantification by water year, and it carries
+several statements the v10 numbers do not support. In priority order:
+
+1. **Add the interannual result as a finding, not an aside.** One paragraph in Results: lapse rate SD 1.0 d/100 m
+   (25 %) and aspect amplitude SD 1.6 d (37 %) between years, four to six times the fit error; direction stable (19°);
+   lapse rate and amplitude co-vary (median r +0.26, 74 % positive, 20 of 103 significant vs 9 by chance; shuffle
+   p < 0.0005). Then the Lundquist 2004 sentence, now as a tested generalisation. Candidate figures: the roses grid, the
+   strip panels, or the lapse-vs-amplitude small multiples (section 12/13 figures).
+2. **Re-derive every aspect number with a count-weighted metric** (sections 11.3, 12.1). "> 40 days" (western HMA) and
+   "~10 days" (Himalaya) become "peak-band amplitude 12 vs 5.5 days (spread 25 vs 12), whole-range 1.5×". Table 1's "Max
+   aspect diff." column is the thin-bin maximum and must be recomputed (the Karakoram's "> 30" is two ~200-pixel cells);
+   the Methods sentence "maximum spread … across 8 aspect bins within each elevation band" becomes the cosine amplitude
+   on 24 bins with ≥ 16 aspects and ≥ 100 (better 1000) pixels per bin. The abstract sentence "40 days … less than 10
+   days" goes with it.
+3. **"Rotate with elevation" → "reverse at both ends, drift in the middle".** Both the Hindu Kush and the Himalaya put
+   north-facing slopes first below ~2500–2800 m and above ~6000 m; the Himalaya additionally drifts south-east at
+   4500–5200 m. Say that, and flag the low-elevation reversal as unexplained (few pixels; possibly ephemeral snow on the
+   sunny side leaving only shaded persistent snow, or a late re-accumulation signal).
+4. **Two regimes for the temperature sensitivity, with the confounding stated.** Mid-latitudes temperature-paced with
+   the snow amount as co-driver (Sierra Nevada r(T, March SWE) = −0.77: the two are inseparable there); poleward of 60°
+   snow-amount paced with a synoptic longwave trigger (section 11.1). Replace "72 % of ranges |r| > 0.4" with the
+   permutation statement from the stats note; add the Evan & Eisenman cross-range test (14.4) as the mechanism sentence.
+5. **High latitudes are not "low variability".** Median anomaly SD 7.8 d and MAD 12.0 d poleward of 60° vs 9.5 / 11.6 d
+   at 35–50°. "Polar … mountain ranges, which melt under strong, consistent solar inputs, show MAD values under 15
+   days" should become "melt under a reliable energy supply, so their year-to-year timing follows the snow amount rather
+   than the spring temperature" (Mioduszewski et al. 2015: insolation and longwave drive melt where onset is in May–June,
+   advection where it is in March–April).
+6. **Radiation anomalies do not pace the interannual anomaly.** Downwelling shortwave explains 0.00 of the pooled
+   within-range variance in every band; insolation sets the *climatological* pattern (aspect, latitude, the seasonal arc),
+   the *anomalies* are paced by temperature/humidity/longwave and by snow amount. This sharpens the "radiative vs
+   advective" language `notes_literature.md` already recommends over "temperature-dominated vs radiation-dominated".
+7. **Tropical Andes and interior Tibet: say "unresolved", not "sublimation".** Nothing in ERA5-Land explains them, their
+   anomaly SD is the largest anywhere (30–42 d), and Fyffe et al. (2025) describe the Peruvian pack below 5000 m as thin
+   and ephemeral with rapid snowfall–melt cycles: the S-1 minimum there is not the same event as a mid-latitude ripening.
+8. **Table 1**: add the interannual range (min–max over years) next to the lapse rate and the aspect amplitude, and the
+   Theil–Sen slope next to the OLS sensitivity.
+9. **Warming-implication paragraph**: the draft's "migrate along the continuum toward more spatially heterogeneous,
+   temperature-sensitive melt" needs the counter-weight that earlier melt is often *synoptic* melt (Rhoades et al.
+   2026; our flat years), which is *less* heterogeneous; and Zheng et al. (2022) found the melt-onset advance
+   decelerating since the 1990s and the Southern Hemisphere trending the other way. Say "two opposing tendencies" rather
+   than one direction.
+
+### 14.3 Other literature to connect
+
+| paper (in the folder unless marked) | connects to |
+| --- | --- |
+| Mioduszewski et al. 2015 | our latitude regimes: advection-paced where onset is Mar–Apr, insolation + longwave where May–Jun; their PCA is the model for a cross-range PCA of our five metrics (recommended in `notes_literature.md`) |
+| Zheng et al. 2022 (radiometer melt onset, 40 yr) | AO/NAO control of pan-Arctic onset → add the spring AO to `teleconnections.ipynb`; the hiatus and SH divergence caveats for the warming paragraph; their Feb-2018 SSW vignette parallels our WY2015/2022/2023 events |
+| Cortés, Vargas & McPhee 2011 (Andes streamflow timing) | central-Chile timing correlates with precipitation/ENSO (r > 0.8) more than temperature: matches our subtropical band, where spring snowfall and March SWE lead and T is weak (Dry Andes: T r² 0.48 but snowfall 0.53) |
+| Fyffe et al. 2025 (Peruvian Andes) | why the tropical Andes are unresolved (thin, ephemeral snow below 5000 m) |
+| Rhoades et al. 2026 (snow-eater heat waves) | the synoptic trigger; the flat-year mechanism; trend context |
+| Pflug & Lundquist 2020 (snow-pattern repeatability) | stable aspect direction, variable amplitude |
+| Bayle et al. 2025; the Alps–Pyrenees SMOD record | complementary melt-out-date products for validating onset-vs-melt-out differences and for the Alps' stability |
+| *not in the folder:* Mortin et al. 2016 (GRL), Mioduszewski et al. 2014 (JGR) | the longwave / warm-moist-intrusion trigger at high latitude (section 11.1) |
+| *not in the folder:* Jennings, Kittel & Molotch 2018 (TC); Musselman et al. 2017 (NCC) | cold content set by snowfall; shallower snow melts earlier — the SWE mechanism |
+| *not in the folder:* Harpold & Brooks 2018 (PNAS, humidity determines ablation) | the dewpoint/longwave axis (PC1 of our predictors) as the physical reason T, Td and LWdown act together |
+
+### 14.4 Evan & Eisenman, tested across our ranges
+
+**Their argument, in our terms.** The date the temperature cycle crosses the melt threshold shifts by ΔT divided by the
+seasonal warming rate at the crossing, ω·√(T₁² − (T₀ − Tₘ)²). Where the annual cycle *grazes* the threshold (maritime,
+small T₁, or T₀ close to Tₘ) the rate is small and a degree moves the date by 10–20 days; where the cycle crosses
+steeply (continental interiors, large T₁, T₀ far from Tₘ) a degree moves it by 2–4 days. Their Eq. 2 adds the factor
+(1 + Rₐ/Rₘ) for the disappearance date. So limited spring-T sensitivity is *predicted* for continental Siberia, interior
+Asia and the Arctic, not because temperature is unimportant but because the seasonal cycle there does the crossing
+almost regardless of the anomaly, and (our section 11.1) because in March the surface is too far below 0 °C for an
+anomaly to reach the threshold at all.
+
+**The test.** T₀ and T₁ from the E&E comparison notebook's cached ERA5 climatology (0.7°, sinusoid fit, cell-mean
+elevation), sampled at range centroids; Tₘ = 0.18 °C and Rₐ/Rₘ = 0.34 as in the notebook; observed = the metrics
+table's OLS spring-T slope (n ≥ 8).
+
+| | value |
+| --- | --- |
+| ranges with a defined crossing at the cell | 84 of 134 |
+| Spearman ρ, E&E-predicted dζ/dT₀ vs observed slope | **+0.51** (p < 0.001); vs observed r +0.48 |
+| median observed slope / median E&E prediction / median first-order crossing shift | −5.0 / −7.0 / **−5.2** d per °C |
+| tercile of the warming rate at the crossing: grazing → middle → steep | observed median slope −6.7 → −5.8 → **−1.5** d/°C; median r −0.72 → −0.71 → **−0.27**; share r < −0.6: 0.79 → 0.68 → 0.18 |
+| within 30–55° only (56 ranges) | ρ = +0.37 (p = 0.005): not just the polar contrast |
+
+The first-order crossing shift reproduces the observed median almost exactly, and the steep-crossing tercile is where
+the insensitive ranges are (Verkhoyansk T₁ = 27 °C, Kolyma 21, Brooks 18; Sierra Nevada and Cascades T₁ ≈ 9 °C, predicted
+−13.6/−13.8, observed −12.6/−10.6). **Caveat that must be fixed before quoting:** 50 ranges are "undefined" because the
+0.7° *cell-mean* climatology never reaches 0 °C — 49 of them on the warm side (Mediterranean, Iberian, Iranian and
+Californian coast ranges, New Zealand, the tropical Andes), i.e. the cell is too low and warm to represent the range's
+snow. Those ranges have a median observed slope of −5.9 d/°C and r −0.61, so they are not physically insensitive; the
+test needs T₀ adjusted to the range's mean snow-pixel elevation (a lapse-rate correction, or ERA5-Land at 9 km).
+
+**Beyond E&E: other controls in the literature.** E&E themselves regress ζ on both T₀ and P₀ (precipitation) and make
+Rₐ/Rₘ (accumulation vs melt rate) part of the sensitivity. Cortés et al. (2011) find precipitation and ENSO, not
+temperature, control Andean timing; Mioduszewski et al. (2015) find advected energy where onset is early and
+insolation + longwave where it is late; Zheng et al. (2022) tie regional onset to AO/NAO and ENSO/SAM; Rhoades et al.
+(2026) to multi-day heat waves; Mortin et al. (2016) to moisture intrusions; Jennings et al. (2018) to snowfall-built
+cold content; Harpold & Brooks (2018) to humidity. All of these are the "other factors" of the original question and
+all map onto the two axes we found (warm-humid-longwave; snow amount and snowfall).
+
+**Is it just low variance?** No. Weak-T ranges (r² < 0.2) have a median anomaly SD of 10.3 days against 8.9 for
+strong-T ranges (r² > 0.5) and the same MAD (12.2 vs 11.1); the polar band has the *smallest* SD (7.8 d) but still
+comparable to the mid-latitudes (9.5). Only 6 of 133 ranges have an interannual SD below 5 days (Hokkaido, Caucasus,
+Northern Altai, Changbai, Tian Shan, Yan), and two of those still show r² ≈ 0.56. The weak ranges with the most variance
+(tropical Andes 30–42 d, Qin Ling 21, Hawaii 18, Min 17, Bayan Har 16) are unexplained by anything, not quiet. The
+sentence for the paper: "insensitivity is a property of the forcing regime and, in a minority of ranges, of the signal,
+not of a lack of variability". (`variance_vs_sensitivity.csv`.)
+
+### 14.5 Aspect control as an elevation profile: the proposed per-range view
+
+`figures/aspect_by_elevation_profiles.png` prototypes it for the Hindu Kush, Himalaya, Sierra Nevada and Alps. Three
+panels per range, elevation on the shared y-axis: (left) the share of the range's snow pixels per 100 m band, so the
+reader sees where the mass is; (middle) the cosine amplitude of the aspect curve per band, one dot per water year in the
+water-year colours, the eleven-year median fields as a line; (right) the azimuth of the earliest-melting aspect per
+band as deviation from equator-facing, marker size scaling with that band-year's amplitude, so weak bands fade.
+
+What it shows that the polar triplet cannot: the Hindu Kush is one broad coherent band (3500–5200 m, 8–12 d, due south,
+tight year to year) with reversals below 2500 m and above 5900 m; the Himalaya has two weaker maxima (4000–4300 m at
+5.5 d; 6800 m at 8 d but almost no pixels), a south-east drift at 4500–5200 m, and the same end reversals; the Sierra
+Nevada's amplitude *grows* with elevation (3 → 8 d) and its phase rotates clockwise toward south-west/west with
+elevation (afternoon heating at high elevation); the Alps peak at 1500–2500 m (11 d) and halve above 3000 m, with a
+reversal only at the glacierised top. In every range the year-to-year spread is smallest where the pixels are and the
+direction holds from year to year in the pixel-rich bands. This is the honest replacement for a single "aspect
+difference" number: report the peak-band amplitude with its elevation, the pixel-weighted amplitude, and the phase
+coherence; show the profile for the exemplar ranges and sweep it for all ranges in the supplement (as the triplets are
+now). A compact two-panel version (amplitude and phase profiles, pixel share as line thickness) would fit the composite
+map's inset budget.
+
+### 14.6 The (range, water year) view: the distribution of aspect timings at each elevation
+
+`scratch/climate_drivers/l_aspect_timing_by_elevation_year.py` → `figures/aspect_timing_by_elevation_<range>_WY<year>.png`
+(one range-year) and `figures/aspect_timing_by_elevation_<range>_all_years.png` (the median fields and the eleven years).
+Rendered for the Sierra Nevada (WY2015, WY2023, all years) and the Hindu Kush (WY2020, all years).
+
+**The form.** The polar triplet unrolled: rows are 100 m elevation bands, columns the 24 aspect bins (N → E → S → W → N),
+colour the onset minus the band's median across aspects (RdBu ±15 d, red = earlier; the triplets' convention), with a
+black tick per band at the cosine-fit azimuth of earliest onset. For one range-year the figure adds the eleven-year
+median fields beside it, the difference (year minus usual pattern, PuOr ±10 d), the year's pixel share per band, and
+a fifth panel with the *absolute* onset (DOWY) against aspect as one line per band coloured by elevation, so the lapse
+rate (line spacing) and the aspect curve (line shape) are read together. Bands with fewer than 16 aspect bins of
+≥ 100 pixels, or under 30 % of the band's usual pixels that year, are blank.
+
+**What it shows.** Sierra Nevada WY2015 (36 days early): the usual south-first pattern holds below 3000 m but the
+strongest contrast moved *up* to 3000–4000 m and the earliest azimuth swung to south-west/west there (+8 to +12 d on
+north/north-east faces, −8 d on west faces relative to the usual year), while the lower bands lost aspect contrast: a
+warm, dry, early year in which low elevations melted out together and the high country was where insolation still
+differentiated. The Hindu Kush grid shows the same south-facing band 3000–5500 m in every year, with the year-to-year
+change in its *intensity* (WY2020, WY2023 strong; WY2017, WY2024 pale), a thin band above 5800 m that flips between
+years, and WY2018 with the low elevations missing (the 30 % coverage rule). The absolute-onset lines make the lapse
+rate and the aspect amplitude visibly the same object seen twice: in WY2015 the lines are closely spaced (shallow
+lapse rate, 3.8 d/100 m) yet bowed (amplitude 7.8 d).
+
+**Use.** This is the per-year diagnostic behind sections 12–13 and the natural supplementary sweep (one grid per
+range); for the main text the (range, year) figure is the way to show a named year, e.g. WY2015 in the Sierra Nevada
+next to a "usual" year, in place of describing it.
