@@ -24,6 +24,8 @@ Usage::
     colorbars.anomaly(cax, n_years=len(ds.water_year), **colorbars.EMBEDDED)
 """
 
+import matplotlib as mpl
+import numpy as np
 from global_snowmelt_runoff_onset import plot_utils as pu
 
 # Font sizes for a bar embedded in a multi-panel figure; the builders default to
@@ -84,6 +86,18 @@ def temperature_sensitivity(ax=None, **kw):
                                         ax=ax, **kw)
 
 
+def temperature_sensitivity_robust(ax=None, **kw):
+    """The same ramp for the robust twin of the world map, whose choropleth is the Theil-Sen slope
+    (median of the pairwise slopes) with the Spearman rank correlation as alpha. The label is kept
+    short: the map fits the bar's standalone rendering into a fixed frame, so a label wider than
+    the bar (~7 in at 15 pt) shrinks the whole artwork."""
+    return pu.create_diverging_colorbar(-12, 0, cmap='YlOrRd_r',
+                                        label='Theil–Sen slope of runoff onset anomaly on spring temp. [days/°C]',   # <= 65 chars keeps the artwork the main map's size
+                                        ticks=[-12, -9, -6, -3, 0], minor_tick_spacing=1,
+                                        left_text='higher sensitivity', right_text='lower sensitivity',
+                                        ax=ax, **kw)
+
+
 def elevation_delay(ax=None, **kw):
     """YlGnBu 0–8 days/100 m: the polar-triplet world map's lapse-rate choropleth ramp."""
     return pu.create_diverging_colorbar(0, 8, cmap='YlGnBu',
@@ -91,3 +105,36 @@ def elevation_delay(ax=None, **kw):
                                         ticks=[0, 2, 4, 6, 8], minor_tick_spacing=1,
                                         left_text='weaker delay', right_text='stronger delay',
                                         ax=ax, **kw)
+
+
+# --------------------------------------------------------------------------- water-year point colours
+WATER_YEAR_CMAP = 'YlGnBu'   # the per-year point colours of every anomaly scatterplot (first year palest)
+
+
+def year_colors(years):
+    """One RGBA colour per water year: ``WATER_YEAR_CMAP`` at ``(year - first) / (last - first)``,
+    exactly what ``scatter(c=year, cmap='YlGnBu', vmin=first, vmax=last)`` gave since 2025, so
+    the existing scatterplots keep their colours. The scatterplot sweeps and
+    :func:`water_year_legend` both draw from this dict."""
+    years = [int(y) for y in years]
+    cmap = mpl.colormaps[WATER_YEAR_CMAP]
+    norm = mpl.colors.Normalize(years[0], years[-1])
+    return {y: tuple(float(c) for c in cmap(norm(y))) for y in years}
+
+
+def water_year_legend(ax, years, fontsize=8, marker_size_pt=7, x_marker=0.2, x_text=0.36):
+    """The scatterplots' point colours as a vertical legend, one ``WY2015``-style row per year
+    with a black-edged circle marker (the Sierra Nevada worked example's legend), filling ``ax``
+    top to bottom; the axes is switched off, the frame is the caller's. Returns the row centres
+    (axes fraction)."""
+    colors = year_colors(years)
+    n = len(colors)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis('off')
+    rows = np.linspace(1 - 0.5 / n, 0.5 / n, n)
+    for y, year in zip(rows, colors):
+        ax.plot([x_marker], [y], marker='o', markersize=marker_size_pt, markerfacecolor=colors[year],
+                markeredgecolor='black', markeredgewidth=0.8, linestyle='none', clip_on=False)
+        ax.text(x_text, y, f'WY{year}', ha='left', va='center', fontsize=fontsize)
+    return rows

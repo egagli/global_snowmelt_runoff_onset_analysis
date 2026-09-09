@@ -13,19 +13,20 @@ Inputs (all pipeline products or tracked files; nothing figure-specific except t
 * ``stats_gdf``: GMBA polygons + per-range metrics, one row per range, any CRS (the GMBA
   inventory merged on ``GMBA_V2_ID`` with ``results/<version>/mountain_range_metrics.csv``, the
   table ``0_aggregate_by_mountain_range.ipynb`` writes). Columns used: ``GMBA_V2_ID``, ``MapName``,
-  ``Level_04``, ``anomaly_slope``, ``anomaly_corr``, ``snowmelt_lapse_rate_per_100m``,
-  ``snowmelt_lapse_rate_n``.
+  ``Level_04``, ``anomaly_slope``, ``anomaly_corr`` (A), ``theil_sen_slope``, ``spearman_rho`` (A,
+  ``robust=True``), ``snowmelt_lapse_rate_per_100m``, ``snowmelt_lapse_rate_n`` (B).
 * ``analyses/mountain_ranges/label_layout.csv``: the curated display flags and the hand-placed
   label anchors in World Robinson metres (``display_map``, ``display_label``,
   ``show_topo``/``show_anom``, ``topo_x/y``, ``anom_x/y``). An anchor is the BOTTOM-LEFT corner
   of the label block. The only input that is neither data nor code.
-* the per-range sweep PNGs (``figures/<version>/{triplets,anomaly_scatterplots}/``), the
-  triplet legend PNG and the hillshade GeoTIFF in ``data/`` (``pipeline/scripts/get_hillshade.py``). The 60° x 30° graticule is
-  generated here.
+* the per-range sweep PNGs (``figures/<version>/{triplets,anomaly_scatterplots,anomaly_scatterplots_robust}/``),
+  the triplet legend PNG and the hillshade GeoTIFF in ``data/`` (``pipeline/scripts/get_hillshade.py``). The
+  60° x 30° graticule, the colorbar and A's water-year legend (the inset points' colours,
+  ``colorbars.year_colors``) are drawn here.
 
 Page model: a figure of the page size (mm); a map axes in projected metres over the map item;
 one page-sized overlay axes in page millimetres (origin top-left) that carries callouts, inset
-images, label text, legend and frames; colorbar axes at the picture positions.
+images, label text, legend and frames; colorbar and year-legend axes at the picture positions.
 
 Provenance. The published figures were laid out in a QGIS project; this module reproduces its
 pages from the same inputs (validated side by side, 2026-09-01) and then departs from it where
@@ -41,8 +42,9 @@ that came out of that reverse engineering and are NOT obvious from the code:
   ramps are continuous; hillshade 0 = outside the ellipse = no-data; the graticule is 0.45 pt.
 * The ``*_QGIS`` styles and ``top_margin_mm=None`` reproduce the project's look; the default
   styles are larger and bolder, the page top is cut (A) or extended (B) to ``TOP_MARGIN_MM``
-  above the highest label, and B's colorbar sits 11.5 mm further left than in the project so
-  its label clears the legend.
+  above the highest label, B's colorbar sits 11.5 mm further left than in the project so
+  its label clears the legend, and A's colorbar is 34 mm narrower (same aspect and bottom edge)
+  to make room for the water-year legend on its right (2026-09-08).
 
 :func:`layout_report` lists collisions (name vs name, name vs inset, colorbar vs legend, off
 page) after any change; the ``plot_*`` functions warn when it finds one.
@@ -77,7 +79,7 @@ from PIL import Image
 from rasterio.enums import Resampling
 from shapely.geometry import Point, box
 
-from gsro_analysis import colorbars, paths
+from gsro_analysis import colorbars, paths, settings
 
 CRS = 'ESRI:54030'                       # World Robinson, +proj=robin +datum=WGS84 +units=m
 MM_PER_PT = 25.4 / 72
@@ -155,7 +157,11 @@ PAGES = {
 # background; figure B's colorbar SVG rendered transparent, the legend PNG carries its own white)
 PICTURES = {
     'temperature_sensitivity': dict(
-        colorbar=dict(rect=(194.126, 246.279, 226.386, 50.335), frame_mm=1.0, background='white')),
+        # the project's colorbar item was (194.126, 246.279, 226.386, 50.335); narrowed to 192 mm at the same
+        # aspect and bottom edge (2026-09-08) to fit the water-year legend of the inset points on its right,
+        # between the bar and the Qiangtang / Southern Alps insets (x >= 427)
+        colorbar=dict(rect=(194.126, 253.924, 192.0, 42.690), frame_mm=1.0, background='white'),
+        year_legend=dict(rect=(390.0, 236.614, 30.0, 60.0), frame_mm=1.0, background='white')),
     'lapse_rates_with_triplets': dict(
         # x was 119.456 in the project, where the bar's label ran under the legend frame;
         # moved 11.5 mm left (2026-09-01) so the label clears the legend by ~4 mm
@@ -190,16 +196,27 @@ def prepare(stats_gdf, layout_csv=LAYOUT_CSV, simplify_m=1000):
     return gdf
 
 
-def sensitivity_fill(gdf):
-    """Figure A fill: YlOrRd at clip(-anomaly_slope/12, 0, 1); alpha interp(anomaly_corr,
-    [-1, 0], [1, 76/255]) (clamped). Returns (rgba (n, 4), drawn mask)."""
-    drawn = (gdf['display_map'] == 1) & gdf['anomaly_slope'].notna()
-    t = np.clip(-gdf['anomaly_slope'].to_numpy(dtype=float) / 12, 0, 1)
+def _slope_fill(gdf, slope_col, corr_col):
+    """YlOrRd at clip(-slope/12, 0, 1); alpha interp(corr, [-1, 0], [1, 76/255]) (clamped), drawn
+    where ``display_map = 1`` and the slope exists. Returns (rgba (n, 4), drawn mask)."""
+    drawn = (gdf['display_map'] == 1) & gdf[slope_col].notna()
+    t = np.clip(-gdf[slope_col].to_numpy(dtype=float) / 12, 0, 1)
     rgba = mpl.colormaps['YlOrRd'](np.nan_to_num(t))
-    rgba[:, 3] = np.interp(np.nan_to_num(gdf['anomaly_corr'].to_numpy(dtype=float)),
+    rgba[:, 3] = np.interp(np.nan_to_num(gdf[corr_col].to_numpy(dtype=float)),
                            [-1, 0], [1, 76 / 255])
     rgba[~drawn.to_numpy()] = 0
     return rgba, drawn.to_numpy()
+
+
+def sensitivity_fill(gdf):
+    """Figure A fill: the OLS slope (``anomaly_slope``, colour) and Pearson r (``anomaly_corr``, alpha)."""
+    return _slope_fill(gdf, 'anomaly_slope', 'anomaly_corr')
+
+
+def robust_sensitivity_fill(gdf):
+    """Figure A's robust twin: the Theil-Sen slope (``theil_sen_slope``, colour) and the Spearman
+    rank correlation (``spearman_rho``, alpha); same ramp and threshold, so one colorbar reads both."""
+    return _slope_fill(gdf, 'theil_sen_slope', 'spearman_rho')
 
 
 def lapse_rate_fill(gdf):
@@ -411,9 +428,10 @@ def _draw_labels(page_ax, geo, style, dpi):
 
 def layout_report(fig, placed):
     """Collisions on a drawn map, from the RENDERED text extents: name vs name, name vs another
-    range's inset, inset vs inset, anything off the page, and the colorbar's full extent
-    (ticks + label) against the other pictures and the insets. ``placed`` is the table a
-    ``plot_*`` function returned (its ``.attrs`` carry the page, pictures and style)."""
+    range's inset, inset vs inset, anything off the page, and the full extent of every natively
+    drawn picture (the colorbar's ticks + label, A's water-year legend) against the other
+    pictures and the insets (``<picture>_overlaps``). ``placed`` is the table a ``plot_*``
+    function returned (its ``.attrs`` carry the page, pictures, style and picture axes)."""
     page, pictures, style = (placed.attrs[k] for k in ('page', 'pictures', 'style'))
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
@@ -436,15 +454,18 @@ def layout_report(fig, placed):
         # None when fewer than two blocks are drawn (a partially processed dataset version)
         min_text_inset_clearance_mm=(round(min(d), 2) if (d := [texts[a].distance(insets[b]) for a in texts for b in insets if a != b]) else None),
     )
-    cax = placed.attrs.get('colorbar_ax')
-    if cax is not None:
-        cbb = mm_box(cax.get_tightbbox(renderer))
-        report['colorbar_bbox_mm'] = tuple(round(v, 1) for v in cbb.bounds)
-        report['colorbar_overlaps'] = ([n for n, p in pictures.items() if n != 'colorbar' and cbb.intersects(box(
-            p['rect'][0], p['rect'][1], p['rect'][0] + p['rect'][2], p['rect'][1] + p['rect'][3]))]
-            + [n for n, g in insets.items() if cbb.intersects(g)])
-        if not page_box.contains(cbb):
-            report['off_page'].append('colorbar')
+    def rect_box(picture):
+        x, y, w, h = picture['rect']
+        return box(x, y, x + w, y + h)
+
+    picture_axes = placed.attrs.get('picture_axes') or {}
+    for name, pax in picture_axes.items():
+        bb = mm_box(pax.get_tightbbox(renderer))
+        report[f'{name}_bbox_mm'] = tuple(round(v, 1) for v in bb.bounds)
+        report[f'{name}_overlaps'] = ([n for n, p in pictures.items() if n != name and bb.intersects(rect_box(p))]
+                                      + [n for n, g in insets.items() if bb.intersects(g)])
+        if not page_box.contains(bb):
+            report['off_page'].append(name)
     return report
 
 
@@ -496,6 +517,19 @@ def _colorbar(fig, page_ax, page, preset, picture):
     return cax
 
 
+def _year_legend(fig, page_ax, page, picture, years):
+    """Figure A's water-year legend, drawn natively at the picture position: white ground and
+    1 mm frame like the colorbar, one row per year (``colorbars.water_year_legend``); the row
+    pitch, marker and font follow the rect height so the list always fills the box."""
+    x, y, w, h = picture['rect']
+    _frame(page_ax, picture, picture['rect'])
+    pitch_pt = h / len(years) / MM_PER_PT
+    inset = 0.05 * h                                        # breathing room above the first and below the last row
+    lax = fig.add_axes(page.mm_to_fig(x, y + inset, w, h - 2 * inset), zorder=2)
+    colorbars.water_year_legend(lax, years, fontsize=0.62 * pitch_pt, marker_size_pt=0.5 * pitch_pt)
+    return lax
+
+
 def _legend_picture(page_ax, path, picture):
     img = Image.open(path).convert('RGBA')
     fitted = _fit_top_left(*picture['rect'], img.width / img.height)
@@ -518,7 +552,7 @@ def _new_page(page, dpi):
 
 def _draw(kind, stats_gdf, version, style, fill_fn, show_col, anchor_cols, inset_sub, suffix,
           layout_csv, hillshade, graticule_deg, hillshade_decimation, out, dpi, top_margin_mm,
-          pictures=None, legend_png=None):
+          pictures=None, legend_png=None, colorbar_preset=None, water_years=None):
     page = PAGES[kind]
     pictures = {k: dict(v) for k, v in (pictures or PICTURES[kind]).items()}
     gdf = prepare(stats_gdf, layout_csv)
@@ -547,9 +581,13 @@ def _draw(kind, stats_gdf, version, style, fill_fn, show_col, anchor_cols, inset
     _choropleth(ax, gdf, rgba, drawn)
     placed = _draw_labels(page_ax, geo, style, dpi)
 
-    preset = {'temperature_sensitivity': colorbars.temperature_sensitivity,
-              'lapse_rates_with_triplets': colorbars.elevation_delay}[kind]
+    preset = colorbar_preset or {'temperature_sensitivity': colorbars.temperature_sensitivity,
+                                 'lapse_rates_with_triplets': colorbars.elevation_delay}[kind]
     cax = _colorbar(fig, page_ax, page, preset, pictures['colorbar'])
+    picture_axes = {'colorbar': cax}
+    if 'year_legend' in pictures:                 # A: the inset points' water-year colours
+        years = water_years if water_years is not None else settings.load_config().water_years
+        picture_axes['year_legend'] = _year_legend(fig, page_ax, page, pictures['year_legend'], [int(y) for y in years])
     if 'legend' in pictures:
         legend_png = legend_png or paths.figdir('mountain_ranges', version) / 'polar_triplet_legend.png'
         if Path(legend_png).exists():
@@ -557,11 +595,11 @@ def _draw(kind, stats_gdf, version, style, fill_fn, show_col, anchor_cols, inset
         else:
             warnings.warn(f'no triplet legend at {legend_png}; run the legend cell of topography_triplet_composite_figure.ipynb')
 
-    placed.attrs.update(kind=kind, page=page, pictures=pictures, style=style, colorbar_ax=cax)
+    placed.attrs.update(kind=kind, page=page, pictures=pictures, style=style, colorbar_ax=cax, picture_axes=picture_axes)
     report = layout_report(fig, placed)
     placed.attrs['layout_report'] = report
-    problems = {k: v for k, v in report.items() if k in ('text_text', 'text_inset', 'inset_inset', 'off_page',
-                                                          'colorbar_overlaps') and v}
+    problems = {k: v for k, v in report.items()
+                if (k in ('text_text', 'text_inset', 'inset_inset', 'off_page') or k.endswith('_overlaps')) and v}
     if problems:
         warnings.warn(f'{kind}: layout collisions {problems} (see world_maps.layout_report)')
     if out is not None:
@@ -593,18 +631,28 @@ TOP_MARGIN_MM = 3.0   # page top sits this far above the highest label block (No
 
 def plot_temperature_sensitivity_map(stats_gdf, version, layout_csv=LAYOUT_CSV, hillshade=HILLSHADE,
                                      graticule_deg=GRATICULE_DEG, hillshade_decimation=4, out=None, dpi=300,
-                                     style=None, top_margin_mm=TOP_MARGIN_MM, pictures=None):
+                                     style=None, top_margin_mm=TOP_MARGIN_MM, pictures=None, robust=False,
+                                     water_years=None):
     """Figure A: spring-temperature sensitivity choropleth (YlOrRd, alpha from
-    the correlation) with a per-range scatterplot inset for the 30 curated ranges. Page 480 mm
-    wide; 300 mm tall with ``top_margin_mm=None``, otherwise cut to the labels (≈ 287 mm).
+    the correlation) with a per-range scatterplot inset for the 30 curated ranges, the colorbar
+    and the water-year legend of the inset points. Page 480 mm wide; 300 mm tall with
+    ``top_margin_mm=None``, otherwise cut to the labels (≈ 287 mm).
+    ``robust=True`` draws the twin map from the robust statistics: colour from the Theil-Sen
+    slope, alpha from the Spearman rank correlation, insets from ``anomaly_scatterplots_robust/``
+    and the colorbar worded accordingly (same ramp, threshold and page).
     ``style``: a :class:`LabelStyle` (default ``STYLE_A``; ``STYLE_A_QGIS`` for the project's
-    look); ``pictures``: a ``PICTURES``-shaped dict to move the colorbar. Returns
+    look); ``pictures``: a ``PICTURES``-shaped dict to move the colorbar and the year legend;
+    ``water_years``: the legend's years (default: the configured dataset version's). Returns
     ``(fig, placed)``; ``placed`` lists every inset drawn (page mm) and carries the layout
     report in ``placed.attrs``. The composite notebook documents every knob."""
-    return _draw('temperature_sensitivity', stats_gdf, version, style or STYLE_A, sensitivity_fill,
-                 'show_anom', ('anom_x', 'anom_y'), 'anomaly_scatterplots',
+    fill_fn = robust_sensitivity_fill if robust else sensitivity_fill
+    inset_sub = 'anomaly_scatterplots_robust' if robust else 'anomaly_scatterplots'
+    preset = colorbars.temperature_sensitivity_robust if robust else colorbars.temperature_sensitivity
+    return _draw('temperature_sensitivity', stats_gdf, version, style or STYLE_A, fill_fn,
+                 'show_anom', ('anom_x', 'anom_y'), inset_sub,
                  '_temperature_2m_spring_months_mean', layout_csv, hillshade, graticule_deg,
-                 hillshade_decimation, out, dpi, top_margin_mm, pictures)
+                 hillshade_decimation, out, dpi, top_margin_mm, pictures, colorbar_preset=preset,
+                 water_years=water_years)
 
 
 def plot_lapse_rate_triplet_map(stats_gdf, version, layout_csv=LAYOUT_CSV, hillshade=HILLSHADE,

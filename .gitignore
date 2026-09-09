@@ -16,6 +16,7 @@ analyses/climate/temperature_sensitivity_comparison/data/
 # see analyses/README.md.
 analyses/mountain_ranges/figures/**/triplets/
 analyses/mountain_ranges/figures/**/anomaly_scatterplots/
+analyses/mountain_ranges/figures/**/anomaly_scatterplots_robust/
 analyses/mountain_ranges/figures/**/regional_panels/*.png
 
 # secrets / tokens
