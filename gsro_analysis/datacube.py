@@ -163,70 +163,71 @@ def add_forest_cover(tile,ds,mask_nodata=True):
     return ds
 
 
-def add_mountain_range_and_basin_and_continent(tile, ds, log=print):
+# the vector unit-id layers (rasterized from cached polygons, no Earth Engine); a refresh can
+# rebuild any subset of them without touching the raster layers
+UNIT_ID_LAYERS = ('GMBA_V2_ID', 'PFAF_ID', 'continent', 'GRDC_MRBID')
+
+
+def _rasterize_ids(tile, ds, gdf, column, name, dtype, log):
+    """Integer id layer ``name`` from polygon attribute ``column``: geocube at 0.0003 deg, then
+    mode-resampled onto the tile's dataset-grid window; -9999 where the tile has no polygon."""
     from geocube.api.core import make_geocube
+    clipped = gdf.clip(tile.bbox_gdf)
+    if clipped.empty:
+        log(f"tile {tile.row},{tile.col}: no {name} polygons in the tile, id layer filled with -9999")
+        ds[name] = xr.full_like(ds['dem'], fill_value=-9999, dtype=dtype)
+        return ds
+    out_grid = make_geocube(vector_data=clipped, measurements=[column], resolution=(-0.0003, 0.0003))
+    ds[name] = out_grid[column].rio.reproject_match(ds['dem'], resampling=rasterio.enums.Resampling.mode)
+    return ds
+
+
+def add_mountain_range_and_basin_and_continent(tile, ds, log=print, layers=UNIT_ID_LAYERS):
+    """Rasterize the requested vector unit-id layers (:data:`UNIT_ID_LAYERS`) onto the tile's window."""
+    unknown = set(layers) - set(UNIT_ID_LAYERS)
+    if unknown:
+        raise ValueError(f"not unit-id layers: {sorted(unknown)}")
 
     # vector sources are downloaded ONCE into analyses/<unit>/data/geometries/ —
     # never fetched over the network per tile (BasinATLAS is ~2.7 GB and
     # figshare intermittently 202s, which corrupted a tile on 2026-08-24)
-    gmba_clipped_gdf = gpd.read_file(
-        settings.gmba_zip(), mask=tile.bbox_gdf).clip(tile.bbox_gdf)
+    if 'GMBA_V2_ID' in layers:
+        gmba_gdf = gpd.read_file(settings.gmba_zip(), mask=tile.bbox_gdf)
+        ds = _rasterize_ids(tile, ds, gmba_gdf, 'GMBA_V2_ID', 'GMBA_V2_ID', np.int16, log)
 
-    if gmba_clipped_gdf.empty:
-        log(f"tile {tile.row},{tile.col}: no mountain ranges in the tile, id layer filled with -9999")
-        ds['GMBA_V2_ID'] = xr.full_like(ds['dem'], fill_value=-9999, dtype=np.int16)
-    else:
-        out_grid = make_geocube(
-            vector_data=gmba_clipped_gdf,
-            measurements=["GMBA_V2_ID"],
-            resolution=(-0.0003, 0.0003),
-        )
+    if 'PFAF_ID' in layers:
+        basins_gdf = gpd.read_file(settings.basin_atlas_gdb(), mask=tile.bbox_gdf,
+                                   layer=settings.BASIN_ATLAS_LAYER)
+        ds = _rasterize_ids(tile, ds, basins_gdf, 'PFAF_ID', 'PFAF_ID', np.int32, log)
 
-        ds['GMBA_V2_ID'] = out_grid['GMBA_V2_ID'].rio.reproject_match(ds['dem'],resampling=rasterio.enums.Resampling.mode)
+    if 'GRDC_MRBID' in layers:
+        grdc_gdf = settings.grdc_mrb_basins(mask=tile.bbox_gdf)   # make_valid applied (55 invalid rings in the source)
+        ds = _rasterize_ids(tile, ds, grdc_gdf, 'MRBID', 'GRDC_MRBID', np.int16, log)
 
-    basins_gdf = gpd.read_file(settings.basin_atlas_gdb(), mask=tile.bbox_gdf,
-                               layer=settings.BASIN_ATLAS_LAYER)
-    basins_clipped_gdf = basins_gdf.clip(tile.bbox_gdf)
-
-    if basins_clipped_gdf.empty:
-        log(f"tile {tile.row},{tile.col}: no basins in the tile, id layer filled with -9999")
-        ds['PFAF_ID'] = xr.full_like(ds['dem'], fill_value=-9999, dtype=np.int32)
-    else:
-        out_grid = make_geocube(
-            vector_data=basins_clipped_gdf,
-            measurements=["PFAF_ID"],
-            resolution=(-0.0003, 0.0003),
-        )
-        
-        ds['PFAF_ID'] = out_grid['PFAF_ID'].rio.reproject_match(ds['dem'],resampling=rasterio.enums.Resampling.mode)
-
-    continents_gdf = gpd.read_file(settings.continents_zip())
-    # NOTE: the integer continent encoding is the alphabetical order of
-    # np.unique — aggregate.CONTINENTS_ENUM must match it, and the ancillary
-    # build stamps it into the tile attrs so downstream code can assert.
-    continents = list(np.unique(list(continents_gdf.CONTINENT)))
-    categorical_enums = {'CONTINENT': continents}
-    continents_clipped_gdf = continents_gdf.clip(tile.bbox_gdf)
-    
-    if continents_clipped_gdf.empty:
-        log(f"tile {tile.row},{tile.col}: no continents in the tile, id layer filled with -9999")
-        ds['continent'] = xr.full_like(ds['dem'], fill_value=-9999, dtype=np.int16)
-        
-    else:
-        out_grid = make_geocube(
-            vector_data=continents_clipped_gdf,
-            measurements=["CONTINENT"],
-            resolution=(-0.0003, 0.0003),
-            categorical_enums=categorical_enums
-            
-        ).where(lambda x: x >= 0)
-
-        # geocube's "no category" code is -1 and it survives the mode resampling
-        # as a value; it is nodata (48k coastal pixels on tile 016_152), not a class
-        ds['continent'] = (out_grid['CONTINENT']
-                           .rio.reproject_match(ds['dem'], resampling=rasterio.enums.Resampling.mode)
-                           .where(lambda x: x >= 0))
-
+    if 'continent' in layers:
+        from geocube.api.core import make_geocube
+        continents_gdf = gpd.read_file(settings.continents_zip())
+        # NOTE: the integer continent encoding is the alphabetical order of
+        # np.unique — aggregate.CONTINENTS_ENUM must match it, and the ancillary
+        # build stamps it into the tile attrs so downstream code can assert.
+        continents = list(np.unique(list(continents_gdf.CONTINENT)))
+        categorical_enums = {'CONTINENT': continents}
+        continents_clipped_gdf = continents_gdf.clip(tile.bbox_gdf)
+        if continents_clipped_gdf.empty:
+            log(f"tile {tile.row},{tile.col}: no continents in the tile, id layer filled with -9999")
+            ds['continent'] = xr.full_like(ds['dem'], fill_value=-9999, dtype=np.int16)
+        else:
+            out_grid = make_geocube(
+                vector_data=continents_clipped_gdf,
+                measurements=["CONTINENT"],
+                resolution=(-0.0003, 0.0003),
+                categorical_enums=categorical_enums
+            ).where(lambda x: x >= 0)
+            # geocube's "no category" code is -1 and it survives the mode resampling
+            # as a value; it is nodata (48k coastal pixels on tile 016_152), not a class
+            ds['continent'] = (out_grid['CONTINENT']
+                               .rio.reproject_match(ds['dem'], resampling=rasterio.enums.Resampling.mode)
+                               .where(lambda x: x >= 0))
     return ds
 
 
@@ -276,15 +277,16 @@ LAYER_LAT_COVERAGE = {
 # ---------------------------------------------------------------------------
 # the ancillary store: one icechunk repository per grid generation on the dataset grid
 
-# the eight layers fetched from their sources and stored on the dataset grid
+# the nine layers fetched from their sources and stored on the dataset grid (GRDC_MRBID added
+# 2026-10-09; an older repository gets it through ensure_ancillary_layers + a unit-layer refresh)
 ANCILLARY_LAYERS = ('dem', 'chili', 'snow_classification', 'esa_worldcover',
-                    'forest_cover_fraction', 'GMBA_V2_ID', 'PFAF_ID', 'continent')
+                    'forest_cover_fraction', 'GMBA_V2_ID', 'PFAF_ID', 'continent', 'GRDC_MRBID')
 # derived at process time from the UTM-reprojected DEM (they need a metric grid)
 DERIVED_LAYERS = ('aspect', 'slope')
 # every ancillary column of the pixel table
 ANCILLARY_VARS = ('dem', 'aspect', 'slope', 'chili', 'snow_classification',
                   'esa_worldcover', 'forest_cover_fraction', 'GMBA_V2_ID',
-                  'PFAF_ID', 'continent')
+                  'PFAF_ID', 'continent', 'GRDC_MRBID')
 
 # Compact on-disk encodings (CF scale/offset + _FillValue, so the DECODED values are what
 # tabulate_tile sees: chili quantized to 1e-4, nodata -> NaN). ~56 MB raw per tile.
@@ -298,6 +300,7 @@ ANCILLARY_ENCODING = {
     'GMBA_V2_ID':            {'dtype': 'int32', '_FillValue': -9999},
     'PFAF_ID':               {'dtype': 'int32', '_FillValue': -9999},
     'continent':             {'dtype': 'int8', '_FillValue': -1},   # -1 = geocube's no-category code
+    'GRDC_MRBID':            {'dtype': 'int16', '_FillValue': -9999},   # 4-digit GRDC MRBID (1201-6xxx)
 }
 LAYER_ATTRS = {
     'dem': {'long_name': 'Copernicus DEM GLO-30 elevation', 'units': 'm'},
@@ -309,6 +312,8 @@ LAYER_ATTRS = {
     'GMBA_V2_ID': {'long_name': 'GMBA mountain inventory v2 (standard 300) range id'},
     'PFAF_ID': {'long_name': 'HydroBASINS Pfafstetter id (BasinATLAS)'},
     'continent': {'long_name': 'continent index (see continent_enum)'},
+    'GRDC_MRBID': {'long_name': 'GRDC Major River Basins of the World (2020) MRBID',
+                   'source': settings.GRDC_MRB_URL, 'citation': settings.GRDC_MRB_CITATION},
 }
 # how each stored layer moves from the dataset grid onto the 80 m UTM grid at process time
 UTM_RESAMPLING = {
@@ -320,6 +325,7 @@ UTM_RESAMPLING = {
     'GMBA_V2_ID': rasterio.enums.Resampling.nearest,
     'PFAF_ID': rasterio.enums.Resampling.nearest,
     'continent': rasterio.enums.Resampling.nearest,
+    'GRDC_MRBID': rasterio.enums.Resampling.nearest,
 }
 KIND_ANCILLARY_TILE = 'ancillary_tile'
 
@@ -394,7 +400,9 @@ def initialize_ancillary_store(config, start_fresh=False, local_store=None, log=
     if ledger.repo_exists(config, prefix, local_store):
         if not start_fresh:
             log(f"ancillary repository exists: {local_store or prefix}")
-            return ledger.open_repo(config, prefix, local_store)
+            repo = ledger.open_repo(config, prefix, local_store)
+            ensure_ancillary_layers(config, repo, log=log)
+            return repo
         ledger.delete_repo(config, prefix, local_store, log=log)
     repo = ledger.create_repo(config, prefix, local_store)
     template, encoding = build_ancillary_template(config)
@@ -411,19 +419,69 @@ def initialize_ancillary_store(config, start_fresh=False, local_store=None, log=
     return repo
 
 
+def ensure_ancillary_layers(config, repo, log=print):
+    """Add every layer of :data:`ANCILLARY_LAYERS` that the repository lacks as an empty array
+    (all fill, the template's chunking and codecs, ``dimension_names`` latitude/longitude) in ONE
+    commit of kind ``schema``. Metadata only: no chunk is written, so the existing layers and
+    their tile commits are untouched and every tile then lacks the new layer in the ledger fold
+    until :func:`refresh_unit_layers` commits it. Idempotent; returns the added names."""
+    import zarr
+    g = zarr.open_group(repo.readonly_session(ledger.BRANCH).store, mode='r')
+    missing = [name for name in ANCILLARY_LAYERS if name not in g.array_keys()]
+    if not missing:
+        return []
+    tile_dim = int(config.spatial_chunk_dim_zarr_output)
+    shape = g['dem'].shape
+
+    def write_fn(session):
+        gw = zarr.open_group(session.store, mode='r+')
+        for name in missing:
+            e = ANCILLARY_ENCODING[name]
+            gw.create_array(name, shape=shape, chunks=(tile_dim, tile_dim), dtype=e['dtype'],
+                            fill_value=e['_FillValue'], dimension_names=('latitude', 'longitude'),
+                            compressors=[zarr.codecs.BloscCodec(cname='zstd', clevel=5, shuffle='shuffle')],
+                            attributes=_json_safe({**LAYER_ATTRS[name], 'grid_mapping': 'spatial_ref',
+                                                   '_FillValue': e['_FillValue']}))
+        gw.attrs['layers'] = list(ANCILLARY_LAYERS)
+
+    metadata = {'schema': ledger.SCHEMA, 'kind': 'schema', 'grid': f"{config.version}_grid",
+                'added_layers': missing, 'layers': list(ANCILLARY_LAYERS), 'provenance': ledger.provenance()}
+    snap = ledger.commit_with_retry(repo, write_fn, f"add ancillary layers {missing} (empty)", metadata, log=log)
+    log(f"ancillary repository: added empty layers {missing} -> {snap}")
+    return missing
+
+
 def ancillary_records(repo):
     """Newest -> oldest ancillary-tile commit records (kind ``ancillary_tile``)."""
     return [r for r in ledger.commit_records(repo) if r.get('kind') == KIND_ANCILLARY_TILE]
 
 
-def completed_ancillary_tiles(config, repo=None, local_store=None):
-    """{(row, col)} with an ancillary commit: the fold over the store's commit history
-    (newest wins; a refreshed tile stays complete). Empty when the repository does not exist."""
+def committed_ancillary_layers(repo):
+    """{(row, col): set of layer names} — the union of the layers of every ancillary-tile commit
+    of the tile (a full build commits all of them, a unit-layer refresh only its subset)."""
+    out = {}
+    for r in ancillary_records(repo):
+        out.setdefault(tuple(int(v) for v in r['tile']), set()).update(r.get('layers', ()))
+    return out
+
+
+def completed_ancillary_tiles(config, repo=None, local_store=None, layers=ANCILLARY_LAYERS):
+    """{(row, col)} whose commits cover every layer in ``layers`` (default: all
+    :data:`ANCILLARY_LAYERS`): the fold over the store's commit history. A tile built before a
+    layer was added is NOT complete until that layer is committed (``refresh_unit_layers``).
+    Empty when the repository does not exist."""
     if repo is None:
         if not ancillary_repo_exists(config, local_store):
             return set()
         repo = open_ancillary_repo(config, local_store)
-    return {tuple(int(v) for v in r['tile']) for r in ancillary_records(repo)}
+    need = set(layers)
+    return {t for t, have in committed_ancillary_layers(repo).items() if need <= have}
+
+
+def missing_ancillary_layers(config, row, col, repo):
+    """The layers of :data:`ANCILLARY_LAYERS` the tile has no commit for, in store order."""
+    have = committed_ancillary_layers(repo).get((int(row), int(col)), set())
+    return tuple(name for name in ANCILLARY_LAYERS if name not in have)
 
 
 def ancillary_tile_complete(config, row, col, repo=None):
@@ -509,7 +567,7 @@ def build_ancillary_window(config, row, col, mask_nodata=True, log=None):
     # vector IDs: internal empty-handling only, exceptions must propagate
     t0 = time.time()
     ds = add_mountain_range_and_basin_and_continent(tile, ds, log=log)
-    log(f"tile {row},{col}:   GMBA_V2_ID, PFAF_ID, continent: polygons rasterized (geocube 0.0003 deg) -> mode "
+    log(f"tile {row},{col}:   {', '.join(UNIT_ID_LAYERS)}: polygons rasterized (geocube 0.0003 deg) -> mode "
         f"({time.time() - t0:.0f}s)")
     ds = ds.drop_vars('_template')[list(ANCILLARY_LAYERS)]
     for name in ds.data_vars:   # keep only serializable attrs (easysnowdata >= 0.0.25 attaches dicts)
@@ -583,7 +641,7 @@ def open_ancillary_window(config, row, col, repo=None, local_store=None):
     return window.rio.set_spatial_dims(x_dim='longitude', y_dim='latitude').rio.write_crs('EPSG:4326')
 
 
-def refresh_unit_layers(config, row, col, layers=('GMBA_V2_ID', 'PFAF_ID', 'continent'), repo=None, log=None):
+def refresh_unit_layers(config, row, col, layers=UNIT_ID_LAYERS, repo=None, log=None):
     """Stage 0b: re-rasterize the vector unit-id layers of a STORED tile into the ancillary
     store (one commit; the raster layers and their Earth Engine work are untouched). How a
     unit definition changes after the ancillary exists (e.g. another HydroBASINS level);
@@ -593,7 +651,7 @@ def refresh_unit_layers(config, row, col, layers=('GMBA_V2_ID', 'PFAF_ID', 'cont
     tile = config.get_tile(row, col)
     window = open_ancillary_window(config, row, col, repo)
     ds = window[['dem']].copy()
-    ds = add_mountain_range_and_basin_and_continent(tile, ds, log=log)
+    ds = add_mountain_range_and_basin_and_continent(tile, ds, log=log, layers=layers)
     snap = write_ancillary_tile(config, repo, row, col, ds, layers=layers, log=log)
     check = open_ancillary_window(config, row, col, repo)
     for name in layers:
@@ -674,7 +732,7 @@ def tabulate_tile(config, row, col, ancillary_window, global_ds=None):
     anc = xr.Dataset()
     for name in ANCILLARY_LAYERS:
         da = ancillary_window[name].astype(np.float32)
-        if name in ('GMBA_V2_ID', 'PFAF_ID'):
+        if name in ('GMBA_V2_ID', 'PFAF_ID', 'GRDC_MRBID'):
             da = da.fillna(-9999.0)          # nodata as the integer sentinel tabulate expects
         anc[name] = da.rio.write_nodata(np.nan).rio.reproject_match(template, resampling=UTM_RESAMPLING[name])
     anc['aspect'], anc['slope'] = terrain_derivatives(anc['dem'])
@@ -695,17 +753,17 @@ def tabulate_tile(config, row, col, ancillary_window, global_ds=None):
             + ["runoff_onset_median", "temporal_resolution_median",
                "runoff_onset_mad", "dem", "aspect", "slope", "chili",
                "snow_classification", "esa_worldcover",
-               "forest_cover_fraction", "GMBA_V2_ID", "PFAF_ID", "continent"]]
+               "forest_cover_fraction", "GMBA_V2_ID", "PFAF_ID", "continent", "GRDC_MRBID"]]
 
     int_cols = wy_cols + ["tile_row", "tile_col", "runoff_onset_median",
                           "dem", "aspect", "slope", "snow_classification",
                           "esa_worldcover", "forest_cover_fraction",
-                          "GMBA_V2_ID", "continent"]
+                          "GMBA_V2_ID", "continent", "GRDC_MRBID"]
     df[int_cols] = (df[int_cols].replace([np.inf, -np.inf, np.nan], -9999)
                     .round().astype(np.int32))
     for c in ("tile_row", "tile_col", "runoff_onset_median", "dem", "aspect",
               "slope", "snow_classification", "esa_worldcover",
-              "forest_cover_fraction", "continent"):
+              "forest_cover_fraction", "continent", "GRDC_MRBID"):
         df[c] = df[c].astype(np.int16)
     df["PFAF_ID"] = (df["PFAF_ID"].replace([np.inf, -np.inf, np.nan], -9999)
                      .astype(np.int32))
@@ -759,19 +817,44 @@ def partials_tile_path(config, row, col):
             f"tile_{row:03d}_{col:03d}.parquet")
 
 
-def completed_partials_tiles(config):
-    """All (row, col) whose partials parquet exists — one flat list call."""
+def partials_schema_of(fs, path):
+    """The ``gsro_partials_schema`` stamp of a partials parquet (footer read only); 1 when absent
+    (blobs written before the stamp existed)."""
+    import pyarrow.parquet as pq
+    with fs.open(path, 'rb') as f:
+        meta = pq.read_metadata(f).metadata or {}
+    return int(meta.get(b'gsro_partials_schema', b'1'))
+
+
+def completed_partials_tiles(config, current=False, workers=32):
+    """(row, col) whose partials parquet exists (one flat list call); with ``current=True`` only
+    those whose stamp equals ``aggregate.PARTIALS_SCHEMA`` (one footer read per blob, threaded):
+    the 'Process tiles to parquets' ledger, so a schema bump re-maps every tile in place."""
+    from concurrent.futures import ThreadPoolExecutor
+    from gsro_analysis import aggregate
     fs = config.azure_blob_fs
     prefix = f"{settings.PARTIALS_PREFIX}/{config.version}"
     if not fs.exists(prefix):
         return set()
-    out = set()
+    found = {}
     for p in fs.ls(prefix, detail=False):
         name = p.rsplit('/', 1)[-1]
         if name.startswith('tile_') and name.endswith('.parquet'):
             _, r, c = name[:-len('.parquet')].split('_')
-            out.add((int(r), int(c)))
-    return out
+            found[(int(r), int(c))] = p
+    if not current:
+        return set(found)
+    with ThreadPoolExecutor(workers) as ex:
+        schemas = dict(zip(found, ex.map(lambda p: partials_schema_of(fs, p), found.values())))
+    return {t for t, v in schemas.items() if v == aggregate.PARTIALS_SCHEMA}
+
+
+def partials_tile_current(config, row, col):
+    """The tile's partials blob exists and carries the current schema stamp."""
+    fs = config.azure_blob_fs
+    path = partials_tile_path(config, row, col)
+    from gsro_analysis import aggregate
+    return fs.exists(path) and partials_schema_of(fs, path) == aggregate.PARTIALS_SCHEMA
 
 
 def write_partials(df, config, row, col, filter_tags=None, log=None):
@@ -784,14 +867,33 @@ def write_partials(df, config, row, col, filter_tags=None, log=None):
     partials.insert(0, 'tile_col', np.int16(col))
     partials.insert(0, 'tile_row', np.int16(row))
     path = partials_tile_path(config, row, col)
-    partials.to_parquet(path, filesystem=config.azure_blob_fs, index=False,
-                        compression='zstd')
+    write_partials_parquet(partials, path, config.azure_blob_fs)
     if len(partials):
         log(f"tile {row},{col}: map — {len(partials):,} partial rows "
             f"({partials['filter_tag'].nunique()} filters x {partials['unit_type'].nunique()} unit types) -> {path}")
     else:   # a verified-empty tile (no pixel with a valid median passed the filters): the empty blob IS the result
         log(f"tile {row},{col}: map — 0 partial rows (no pixel with a valid median) -> empty {path}")
     return len(partials)
+
+
+def write_partials_parquet(partials, path, fs=None):
+    """One partials parquet (zstd, no index) with the schema stamp in its key-value metadata:
+    ``gsro_partials_schema`` (:data:`aggregate.PARTIALS_SCHEMA`) and ``gsro_unit_types``. Written
+    through one open handle, so the blob appears atomically on close (an overwrite replaces it whole)."""
+    import json
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from gsro_analysis import aggregate
+    table = pa.Table.from_pandas(partials, preserve_index=False)
+    meta = dict(table.schema.metadata or {})
+    meta[b'gsro_partials_schema'] = str(aggregate.PARTIALS_SCHEMA).encode()
+    meta[b'gsro_unit_types'] = json.dumps(list(aggregate.UNIT_TYPES)).encode()
+    table = table.replace_schema_metadata(meta)
+    if fs is None:
+        pq.write_table(table, path, compression='zstd')
+    else:
+        with fs.open(path, 'wb') as f:
+            pq.write_table(table, f, compression='zstd')
 
 
 def partials_from_pixel_table(config, row, col, filter_tags=None):

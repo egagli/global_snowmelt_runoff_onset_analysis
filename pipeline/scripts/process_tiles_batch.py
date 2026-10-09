@@ -3,7 +3,8 @@ dataset store and of the ancillary store, reproject both onto the tile's 80 m UT
 the pixels and write the tile's PARTIAL SUMS parquet (datacube.process_tile); with --keep-pixels
 also the per-pixel parquet. One matrix job runs one batch; equally runnable locally.
 
-Tiles whose partials blob exists are skipped. A tile without an ancillary commit fails (run 'Get
+Tiles whose partials blob exists WITH the current schema stamp (aggregate.PARTIALS_SCHEMA) are
+skipped; an older blob is re-mapped and overwritten in place (atomic: the new blob replaces it whole). A tile without an ancillary commit fails (run 'Get
 ancillary data' first). Failure = exception = no output: the tile is re-listed by the next
 dispatch. The job exits nonzero if any tile failed, but one bad tile never blocks its batchmates.
 
@@ -62,9 +63,9 @@ def main():
     for i, (row, col) in enumerate(tiles):
         t0 = time.time()
         try:
-            if fs.exists(datacube.partials_tile_path(config, row, col)) and (
+            if datacube.partials_tile_current(config, row, col) and (
                     not args.keep_pixels or fs.exists(datacube.parquet_tile_path(config, row, col))):
-                print(f"[{i+1}/{len(tiles)}] tile {row},{col}: partials exist, skip", flush=True)
+                print(f"[{i+1}/{len(tiles)}] tile {row},{col}: partials current, skip", flush=True)
                 continue
             print(f"[{i+1}/{len(tiles)}] tile {row},{col}: start", flush=True)
             n_px, n_rows = datacube.process_tile(config, row, col, global_ds=global_ds,

@@ -138,7 +138,7 @@ def bin_centers(name):
 # the pixel: its row then carries NaN there and only groups that use that
 # axis leave it out. ``id_col`` is the ancillary layer: GMBA_V2_ID (standard
 # 300 inventory), PFAF_ID at HydroBASINS level :data:`BASIN_LEVEL_STORED`,
-# the USGS continent code.
+# the USGS continent code, GRDC_MRBID (GRDC Major River Basins 2020).
 UNIT_TYPES = {
     "mountain_ranges": {"id_col": "GMBA_V2_ID", "unit_dim": "mountain_range",
                         "bins": ("elevation", "aspect"), "optional_bins": ()},
@@ -146,6 +146,9 @@ UNIT_TYPES = {
                         "bins": ("elevation",), "optional_bins": ()},
     "continents":      {"id_col": "continent", "unit_dim": "continent",
                         "bins": ("latitude", "elevation", "aspect"), "optional_bins": ("aspect",)},
+    # GRDC Major River Basins (2020), 4-digit MRBID; added 2026-10-09 (partials schema 2)
+    "grdc_basins":     {"id_col": "GRDC_MRBID", "unit_dim": "grdc_basin",
+                        "bins": ("elevation", "aspect"), "optional_bins": ("aspect",)},
 }
 BASIN_LEVEL_STORED = settings.BASIN_ATLAS_STORED_LEVEL   # 6
 
@@ -159,8 +162,15 @@ GROUPS = {
     "river_basins_l6":   {"unit_type": "river_basins", "bins": ("elevation",), "basin_level": 6},
     "continents":        {"unit_type": "continents", "bins": ("latitude", "elevation")},
     "continents_aspect": {"unit_type": "continents", "bins": ("latitude", "elevation", "aspect")},
+    "grdc_basins":       {"unit_type": "grdc_basins", "bins": ("elevation",)},
+    "grdc_basins_aspect": {"unit_type": "grdc_basins", "bins": ("elevation", "aspect")},
 }
-DEFAULT_GROUPS = ("mountain_ranges", "river_basins", "continents")
+DEFAULT_GROUPS = ("mountain_ranges", "river_basins", "continents", "grdc_basins")
+
+# Version of the partials layout (the map's unit types, keys and sums), stamped into every partials
+# parquet's key-value metadata (``gsro_partials_schema``). The fleet re-maps a tile whose blob carries
+# an older stamp (or none): 1 = 2026-09-03 (three unit types), 2 = 2026-10-09 (+ grdc_basins).
+PARTIALS_SCHEMA = 2
 
 
 def basin_level_ids(pfaf_ids, level, stored=BASIN_LEVEL_STORED):
@@ -575,26 +585,43 @@ def elevation_relative(da, dim="aspect"):
 # the partials cache: the fleet product, downloaded once per tile
 
 def sync_partials(config, cache_dir, workers=16, log=print):
-    """Download the partials parquets of ``config.version`` that are missing from ``cache_dir``
-    (``paths.partials_cache(version)``) and delete cached files Azure no longer lists (a redone
-    tile). Re-runs only fetch new tiles. Needs the Azure SAS token. Returns the sorted local paths."""
+    """Mirror the partials parquets of ``config.version`` into ``cache_dir``
+    (``paths.partials_cache(version)``): download tiles missing from the cache or whose blob changed
+    on Azure (a re-mapped tile; compared by etag, recorded in ``.sync_etags.json``, falling back to
+    the size for files cached before the manifest existed) and delete cached files Azure no longer
+    lists. Re-runs fetch only what changed. Needs the Azure SAS token. Returns the sorted local paths."""
+    import json
     import os
     from concurrent.futures import ThreadPoolExecutor
     fs = config.azure_blob_fs
     prefix = f"{settings.PARTIALS_PREFIX}/{config.version}"
-    remote = {p.rsplit('/', 1)[-1]: p for p in fs.ls(prefix, detail=False) if p.endswith('.parquet')}
+    remote = {d['name'].rsplit('/', 1)[-1]: d for d in fs.ls(prefix, detail=True) if d['name'].endswith('.parquet')}
+    manifest_path = cache_dir / '.sync_etags.json'
+    etags = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     local = {f for f in os.listdir(cache_dir) if f.endswith('.parquet')}
     stale = local - set(remote)
     for f in stale:
         os.remove(cache_dir / f)
-    missing = sorted(set(remote) - local)
+        etags.pop(f, None)
+
+    def changed(name):
+        if name not in local:
+            return True
+        if name in etags:
+            return etags[name] != remote[name].get('etag')
+        return os.path.getsize(cache_dir / name) != remote[name].get('size')
+
+    todo = sorted(n for n in remote if changed(n))
+    n_new = sum(n not in local for n in todo)
     log(f"partials on Azure: {len(remote)} | cached: {len(local) - len(stale)} | "
-        f"downloading {len(missing)} | dropped stale {len(stale)}")
+        f"downloading {len(todo)} ({n_new} new, {len(todo) - n_new} changed) | dropped stale {len(stale)}")
 
     def fetch(name):
-        fs.get_file(remote[name], str(cache_dir / f"{name}.part"))
+        fs.get_file(remote[name]['name'], str(cache_dir / f"{name}.part"))
         os.replace(cache_dir / f"{name}.part", cache_dir / name)
 
     with ThreadPoolExecutor(workers) as ex:
-        list(ex.map(fetch, missing))
+        list(ex.map(fetch, todo))
+    etags.update({n: remote[n].get('etag') for n in remote})
+    manifest_path.write_text(json.dumps(etags))
     return sorted(cache_dir / f for f in remote)

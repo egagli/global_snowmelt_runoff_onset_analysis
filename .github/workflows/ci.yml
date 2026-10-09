@@ -48,6 +48,12 @@ jobs:
           path: global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/BasinATLAS_Data_v10.gdb.zip
           key: basinatlas-v10-gdb
 
+      - name: Restore the GRDC Major River Basins zip (123 MB, downloaded once per cache key; the GRDC basin names)
+        uses: actions/cache@v4
+        with:
+          path: global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/GRDC_Major_River_Basins_shp.zip
+          key: grdc-mrb-2020-shp
+
       - name: Import the package
         working-directory: global_snowmelt_runoff_onset_analysis
         run: pixi run -e ci python -c "import gsro_analysis.aggregate, gsro_analysis.datacube, gsro_analysis.era5; print('ok')"

@@ -1,14 +1,20 @@
-"""'Get ancillary data' worker: for a batch of tiles, build the eight ancillary layers on the
-tile's window of the DATASET grid and commit them to the grid generation's icechunk repository
-(datacube.build_ancillary_window -> write_ancillary_tile). One matrix job runs one batch;
-equally runnable locally (--tile / --tile-list, --local-store for a local repo).
+"""'Get ancillary data' worker: for a batch of tiles, build the ancillary layers on the tile's
+window of the DATASET grid and commit them to the grid generation's icechunk repository. One
+matrix job runs one batch; equally runnable locally (--tile / --tile-list, --local-store for a
+local repo).
 
-Tiles that already have a commit are skipped (the ledger is folded once per job). Failure =
-exception = no commit: the tile is re-listed by the next dispatch. The job exits nonzero if any
-tile failed, so the run shows red, but one bad tile never blocks its batchmates.
+Per tile, the ledger fold (once per job) says which of datacube.ANCILLARY_LAYERS are committed:
+  all of them                      -> skip
+  none                             -> full build (build_ancillary_window -> write_ancillary_tile)
+  all but some unit-id layers      -> refresh only those (refresh_unit_layers: polygons, no Earth
+                                      Engine) — how a layer added after the campaign (GRDC_MRBID,
+                                      2026-10-09) is backfilled
+  anything else                    -> full build
+Failure = exception = no commit: the tile is re-listed by the next dispatch. The job exits nonzero
+if any tile failed, so the run shows red, but one bad tile never blocks its batchmates.
 
-Needs Earth Engine (CHILI) + an Azure SAS token; the repository must exist (the plan job's
-`get_remaining_work.py --stage ancillary` creates it).
+Needs an Azure SAS token, and Earth Engine (CHILI) for full builds only; the repository must exist
+(the plan job's `get_remaining_work.py --stage ancillary` creates it and adds missing layers).
 """
 
 import argparse
@@ -56,24 +62,34 @@ def main():
     config = settings.load_config(args.config)
     log = lambda m: print(f"    {m}", flush=True)  # noqa: E731
 
-    print(f"Earth Engine initialized as {settings.initialize_earthengine(key_file=args.ee_key)}", flush=True)
     # warm the vector-source cache ONCE before looping: per-tile reads must never hit the network
     settings.gmba_zip()
     settings.continents_zip()
     settings.basin_atlas_gdb()
+    settings.grdc_mrb_zip()
 
     repo = datacube.open_ancillary_repo(config, args.local_store)
-    done = datacube.completed_ancillary_tiles(config, repo)
+    committed = datacube.committed_ancillary_layers(repo)
+    ee_ready = False
     failed = []
     for i, (row, col) in enumerate(tiles):
         t0 = time.time()
         try:
-            if (row, col) in done:
+            have = committed.get((row, col), set())
+            missing = tuple(n for n in datacube.ANCILLARY_LAYERS if n not in have)
+            if not missing:
                 print(f"[{i+1}/{len(tiles)}] tile {row},{col}: ancillary committed, skip", flush=True)
                 continue
-            print(f"[{i+1}/{len(tiles)}] tile {row},{col}: start", flush=True)
-            ds = datacube.build_ancillary_window(config, row, col, log=log)
-            datacube.write_ancillary_tile(config, repo, row, col, ds, duration_s=time.time() - t0, log=log)
+            if have and set(missing) <= set(datacube.UNIT_ID_LAYERS):
+                print(f"[{i+1}/{len(tiles)}] tile {row},{col}: refresh {missing} (no Earth Engine)", flush=True)
+                datacube.refresh_unit_layers(config, row, col, layers=missing, repo=repo, log=log)
+            else:
+                if not ee_ready:
+                    print(f"Earth Engine initialized as {settings.initialize_earthengine(key_file=args.ee_key)}", flush=True)
+                    ee_ready = True
+                print(f"[{i+1}/{len(tiles)}] tile {row},{col}: start (full build)", flush=True)
+                ds = datacube.build_ancillary_window(config, row, col, log=log)
+                datacube.write_ancillary_tile(config, repo, row, col, ds, duration_s=time.time() - t0, log=log)
             print(f"[{i+1}/{len(tiles)}] tile {row},{col}: done ({time.time() - t0:.0f}s)", flush=True)
         except Exception:
             print(f"[{i+1}/{len(tiles)}] tile {row},{col}: FAILED after {time.time() - t0:.0f}s", flush=True)

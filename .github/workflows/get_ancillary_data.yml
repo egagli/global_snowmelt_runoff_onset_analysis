@@ -1,12 +1,14 @@
 name: "2. Get ancillary data"
 
 # Wave 2 of a dataset version (after 'Get ERA5-Land data', before 'Process tiles to parquets'):
-# the eight static ancillary layers of every tile (Copernicus DEM, CHILI from Earth Engine, snow
-# class, WorldCover, forest cover, GMBA / HydroBASINS level-6 / continent ids), resampled onto
+# the nine static ancillary layers of every tile (Copernicus DEM, CHILI from Earth Engine, snow
+# class, WorldCover, forest cover, GMBA / HydroBASINS level-6 / continent / GRDC major-basin ids), resampled onto
 # the tile's window of the DATASET grid and committed to ONE icechunk repository per grid
 # generation (pipeline/scripts/build_ancillary_batch.py; layout in gsro_analysis/datacube.py).
-# The plan job creates the repository if it does not exist, folds its commit history and lists
-# the tiles without a commit; each matrix job builds one batch, one commit per tile. Failure =
+# The plan job creates the repository if it does not exist (or adds layers new to the code as empty
+# arrays), folds its commit history and lists the tiles whose commits do not cover every layer; each
+# matrix job builds one batch, one commit per tile. A tile missing only unit-id layers (GRDC_MRBID,
+# added 2026-10-09) is refreshed from the cached polygons without Earth Engine. Failure =
 # no commit = re-listed next dispatch; re-dispatch until the plan job reports 0 remaining.
 # `start_fresh` (off by default) DELETES the version's ancillary repository first: the only
 # deletion this workflow can make. Runs on the GitHub-hosted runners of this public repository
@@ -17,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       batch_size:
-        description: 'Tiles per matrix job (~2.5 min per tile)'
+        description: 'Tiles per matrix job (~2.5 min per full build; a unit-layer refresh is seconds)'
         required: false
         default: '36'
         type: string
@@ -79,9 +81,10 @@ jobs:
             global_snowmelt_runoff_onset_analysis/analyses/mountain_ranges/data/geometries/GMBA_Inventory_v2.0_standard_300.zip
             global_snowmelt_runoff_onset_analysis/analyses/continents/data/geometries/continents.zip
             global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/BasinATLAS_Data_v10.gdb.zip
-          key: vector-sources-v2
+            global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/GRDC_Major_River_Basins_shp.zip
+          key: vector-sources-v3
 
-      - name: Create the ancillary repository if missing, fold its ledger, list the tiles without a commit
+      - name: Create the ancillary repository if missing (or add new layers), fold its ledger, list the incomplete tiles
         id: plan
         working-directory: global_snowmelt_runoff_onset_analysis
         run: |
@@ -132,7 +135,8 @@ jobs:
             global_snowmelt_runoff_onset_analysis/analyses/mountain_ranges/data/geometries/GMBA_Inventory_v2.0_standard_300.zip
             global_snowmelt_runoff_onset_analysis/analyses/continents/data/geometries/continents.zip
             global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/BasinATLAS_Data_v10.gdb.zip
-          key: vector-sources-v2
+            global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/GRDC_Major_River_Basins_shp.zip
+          key: vector-sources-v3
 
       - name: Write Earth Engine service key
         run: |

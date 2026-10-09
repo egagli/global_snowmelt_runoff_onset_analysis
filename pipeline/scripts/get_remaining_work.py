@@ -1,11 +1,13 @@
 """Dispatcher of the two tile waves: derive the remaining work from the ledgers.
 
---stage ancillary   'Get ancillary data': tiles of the work list without a commit in the grid
-                    generation's ancillary icechunk repository (the fold over its history). The
-                    repository is created with the empty template if it does not exist.
---stage partials    'Process tiles to parquets': tiles WITH an ancillary commit and without a
-                    partials parquet (blob existence, one list call). Tiles without an ancillary
-                    commit are reported as blocked, never dispatched.
+--stage ancillary   'Get ancillary data': tiles of the work list whose commits do not yet cover every
+                    layer of datacube.ANCILLARY_LAYERS (the fold over the repository's history). The
+                    repository is created with the empty template if it does not exist, and layers
+                    added to the code since are added to it as empty arrays (one 'schema' commit).
+--stage partials    'Process tiles to parquets': tiles whose ancillary is complete and whose partials
+                    parquet is missing or carries an older schema stamp than aggregate.PARTIALS_SCHEMA
+                    (one list call + one footer read per blob). Tiles with incomplete ancillary are
+                    reported as blocked, never dispatched.
 
 A tile is dispatched only once its inputs exist; the workers skip finished tiles themselves, so
 a stale listing is harmless. Batches go to a manifest json shared between the plan job and the
@@ -66,10 +68,12 @@ def main():
         if args.start_fresh:
             datacube.reset_version(config, what=('partials', 'pixel_tables'), confirm=True)
         done_anc = datacube.completed_ancillary_tiles(config)
-        done_part = datacube.completed_partials_tiles(config)
+        exist_part = datacube.completed_partials_tiles(config)
+        done_part = datacube.completed_partials_tiles(config, current=True)
         remaining = [t for t in tiles if t in done_anc and t not in done_part]
         blocked = [t for t in tiles if t not in done_anc]
-        summary = f"ancillary committed {len(done_anc)} | partials done {len(done_part)} | blocked (no ancillary) {len(blocked)}"
+        summary = (f"ancillary complete {len(done_anc)} | partials current {len(done_part)} "
+                   f"(+ {len(exist_part - done_part)} on an older schema, to re-map) | blocked (ancillary incomplete) {len(blocked)}")
 
     batches = [remaining[i:i + args.batch_size] for i in range(0, len(remaining), args.batch_size)]
     if args.max_batches:

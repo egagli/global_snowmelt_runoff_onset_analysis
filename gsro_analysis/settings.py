@@ -160,6 +160,34 @@ BASIN_ATLAS_STORED_LEVEL = 6
 BASIN_ATLAS_LAYER = "BasinATLAS_v10_lev06"
 
 
+# GRDC Major River Basins of the World, 2nd rev. ed. 2020 (BfG/GRDC): 520 named major basins (field
+# MRBID = 4-digit id, RIVERBASIN = name, also CONTINENT/SEA/OCEAN), derived from HydroSHEDS; non-overlapping,
+# 55 invalid rings repaired with make_valid before rasterizing. The fleet stores MRBID per pixel as the
+# ancillary layer GRDC_MRBID (added 2026-10-09). NOT the World Bank "Major Basins of the World" (254 coarse
+# 2011 polygons) that easysnowdata's get_grdc_major_river_basins_of_the_world downloads despite its name.
+GRDC_MRB_URL = "https://grdc.bafg.de/downloads/GRDC_Major_River_Basins_shp.zip"
+GRDC_MRB_MD5 = "405c5d23fc53a88a186baf699b0e0e37"   # the 2021-12-01 shapefile release, checked 2026-10-09
+GRDC_MRB_LAYER = "mrb_basins.shp"
+GRDC_MRB_CITATION = ("GRDC (2020): GRDC Major River Basins. Global Runoff Data Centre. 2nd, rev. ed. "
+                     "Koblenz: Federal Institute of Hydrology (BfG).")
+
+
+def grdc_mrb_zip():
+    """The GRDC Major River Basins shapefile zip (123 MB: basins + river networks), downloaded once
+    (md5-checked) into ``analyses/river_basins/data/geometries/``; the fleet and the notebooks read the
+    basin layer from it (``grdc_mrb_basins()``)."""
+    from gsro_analysis import paths
+    return cached_source(GRDC_MRB_URL, expected_md5=GRDC_MRB_MD5, dest_dir=paths.geometries('river_basins'))
+
+
+def grdc_mrb_basins(mask=None):
+    """The 520 GRDC major basins (EPSG:4326) with valid geometries; ``mask`` as in ``gpd.read_file``."""
+    import geopandas as gpd
+    gdf = gpd.read_file(f"zip://{grdc_mrb_zip()}!{GRDC_MRB_LAYER}", mask=mask)
+    gdf['geometry'] = gdf.geometry.make_valid()
+    return gdf
+
+
 def basin_atlas_layer(level):
     """gdb layer name of HydroBASINS level ``level`` (1-12) in the cached
     BasinATLAS v1.0 file."""

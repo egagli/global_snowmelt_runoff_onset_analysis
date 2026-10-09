@@ -18,4 +18,6 @@ which must write the cubes under `/tmp/ci/analyses/<unit>/data/aggregation/v10/`
 `/tmp/ci/analyses/<unit>/results/v10/`. GMBA and the USGS continents are read from the web; the BasinATLAS gdb (2.7 GB)
 is downloaded into `analyses/river_basins/data/geometries/` on first use and restored from the Actions cache afterwards;
 the GTOPO30 histogram and the level-6 population table are tracked. Regenerate the fixtures by copying two tiles from
-`partials/<version>/` after a schema change.
+`partials/<version>/` after a schema change. The current fixtures are partials schema 1 (no `grdc_basins` rows;
+the GRDC section of the river-basin notebook reports that and skips): replace them after the 2026-10-09 re-map,
+choosing tiles with GRDC basins (e.g. 025_127, the Alps: Po, Rhine, Rhône).

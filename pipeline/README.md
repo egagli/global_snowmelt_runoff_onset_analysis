@@ -54,22 +54,52 @@ free `groupby` at reduce time while a finer one is a fleet re-map:
   elevation (aspect summed out, so flat pixels with no aspect still count); `BUILD_ASPECT_CUBE = True` at
   the top of `0_aggregate_by_continent.ipynb` also writes the latitude × elevation × aspect cube (drops the
   ~0.06 % flat pixels).
+- **GRDC Major River Basins** (2020; 520 named basins, `settings.GRDC_MRB_URL`) are a fourth unit type,
+  `grdc_basins`, keyed by the ancillary layer `GRDC_MRBID` with elevation and the optional aspect key (added
+  2026-10-09, partials schema 2). The default `grdc_basins` cube sums the aspect out; `grdc_basins_aspect` keeps
+  it. `0_aggregate_by_river_basin.ipynb` section 6 writes the cube, its ERA5 zonal means and
+  `results/<version>/grdc_basin_metrics.csv` with the basin names, continent and sea. Pixels outside the 520
+  basins belong to no GRDC unit. The source shapefile (123 MB) is cached like BasinATLAS; easysnowdata's
+  `get_grdc_major_river_basins_of_the_world` is NOT this product (it downloads the World Bank's 254 coarse 2011
+  basins).
 - **CHILI** is the fourth key of every unit type; `aggregate.collapse` folds it exactly on read.
 - **Filters** (`aggregate.FILTERS`): `fcf_lte_50` = seasonal snow class ≠ 4 (ephemeral) + WorldCover
   ∉ {50, 80} + 0 ≤ fcf ≤ 50 (the ≥ 0 bound also drops nodata); `full_dataset` = the first two only.
 
 Changing a unit definition after the ancillary exists is `datacube.refresh_unit_layers(config, row,
-col)` (re-rasterizes the id layers of a stored tile into the ancillary store, one commit, no Earth
-Engine) followed by a re-map of the tile (`process_tile`).
+col, layers=...)` (re-rasterizes the given id layers of a stored tile into the ancillary store, one commit, no
+Earth Engine) followed by a re-map of the tile (`process_tile`).
+
+**Adding a unit type to a finished campaign** (how `grdc_basins` was added, 2026-10-09) is the two existing
+workflows re-dispatched, nothing else:
+
+1. Add the id layer to `datacube.ANCILLARY_LAYERS` / `UNIT_ID_LAYERS` (encoding, attrs, resampling, the
+   rasterizer) and the unit type to `aggregate.UNIT_TYPES`; bump `aggregate.PARTIALS_SCHEMA`.
+2. **Get ancillary data**: the plan job adds the new layer to the existing repository as an empty array (one
+   `schema` commit, `datacube.ensure_ancillary_layers`; no chunk is written) and, because a tile is complete only
+   when its commits cover every layer (`datacube.completed_ancillary_tiles`), lists every tile; the workers see
+   that only unit-id layers are missing and refresh just those from the cached polygons (seconds per tile, no
+   Earth Engine).
+3. **Process tiles to parquets**: the plan job reads each partials blob's footer and lists every tile whose
+   `gsro_partials_schema` stamp is older; the workers re-map them and overwrite the blob in place (the old blob
+   stays readable until the new one replaces it whole).
+4. Run the aggregation notebooks: `aggregate.sync_partials` re-downloads every blob whose etag changed.
+
+The re-map leaves the existing unit types bit for bit unchanged (verified on two fleet tiles against their live
+blobs, 2026-10-09) **only in the fleet's `ci` pixi environment**: the `default` environment resolves an older
+GDAL/PROJ (3.12/9.7 vs 3.13/9.8) and its UTM reprojection keeps ~0.3 % fewer pixels per tile. Re-map only
+through the workflow, or locally with `pixi run -e ci`.
 
 ## Wave mechanics
 
 The ~4,320-tile campaign runs as GitHub Actions matrices (`.github/workflows/get_ancillary_data.yml`,
 `process_tiles.yml`), the production repo's icechunk fleet pattern:
 
-- **ledgers**: wave 2 = a commit with metadata (`kind: ancillary_tile, tile: [row, col]`) in the
-  ancillary repository, folded from its history (`datacube.completed_ancillary_tiles`); wave 3 = the
-  partials parquet exists (single blob = atomic, one list call). A failed tile commits or writes nothing
+- **ledgers**: wave 2 = commits with metadata (`kind: ancillary_tile, tile: [row, col], layers: [...]`) in the
+  ancillary repository, folded from its history; a tile is done when its commits cover every layer of
+  `datacube.ANCILLARY_LAYERS` (`datacube.completed_ancillary_tiles`); wave 3 = the partials parquet exists
+  (single blob = atomic, one list call) with the current schema stamp (one footer read per blob, ~30 s for
+  the grid). A failed tile commits or writes nothing
   and is re-listed by the next dispatch.
 - **dispatch**: `scripts/get_remaining_work.py --stage ancillary|partials` folds the ledgers, diffs
   against `tile_data/ancillary_tiles_v10.txt` (every tile whose composites hold data, from the dataset's

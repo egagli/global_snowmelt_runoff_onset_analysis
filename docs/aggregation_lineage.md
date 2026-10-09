@@ -374,3 +374,28 @@ quoted, consider making the robust estimate the headline (Theil–Sen, or a boot
 OLS slope, a Huber/RANSAC fit, a Spearman correlation), and consider pooling ranges hierarchically if
 a global sensitivity is wanted. Nothing in the pipeline changes for this; it is a choice made where
 the numbers are read.
+
+## Design note: GRDC Major River Basins as a fourth unit type (2026-10-09)
+
+**Why.** HydroBASINS units are Pfafstetter codes without names. GRDC's *Major River Basins of the World* (2020,
+520 basins, derived from HydroSHEDS) carries the river name, continent, sea and ocean, so tables and maps can be
+read as "the Po" rather than "PFAF 23457". The alternative, a reduce-time crosswalk from level-6 basins to GRDC
+basins, would assign straddling level-6 basins by majority area; the pixel layer assigns every pixel exactly.
+
+**What was added.** The ancillary layer `GRDC_MRBID` (int16, -9999 = no basin; rasterized like the other id
+layers: geocube at 0.0003° then mode onto the dataset grid, nearest onto the UTM grid), the unit type
+`grdc_basins` (elevation × optional aspect × CHILI class, like continents so flat pixels count in the default
+group), the groups `grdc_basins` and `grdc_basins_aspect`, and partials schema 2 (a `gsro_partials_schema` stamp
+in each parquet's footer). Two ledger rules changed so the two existing workflows backfill a finished campaign
+without a reset: an ancillary tile is complete when its commits cover every layer (so the new layer is listed
+and refreshed without Earth Engine), and a partials blob is done only with the current stamp (so it is
+re-mapped in place). `aggregate.sync_partials` now re-downloads blobs whose etag changed (it used to fetch
+only missing names, which would have kept the old blobs forever).
+
+**Verified (local, no Azure writes).** An eight-layer copy of two live tiles (Rainier 025_039, Alps 025_127)
+migrated, refreshed and re-mapped in the `ci` environment: the old unit types are bit-identical to the live
+blobs; GRDC covers 77 % (Columbia) and 100 % (Po, Rhine, Rhône) of the windows; in the Alps tile the GRDC and
+HydroBASINS pixel counts are equal, in the Rainier tile GRDC holds 80 % (the rest drains to Puget Sound coastal
+basins outside the 520). The river-basin notebook runs on old-schema partials (GRDC section skips) and on
+schema-2 partials (writes the cubes and the metrics table).
+
