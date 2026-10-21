@@ -75,8 +75,13 @@ free `groupby` at reduce time while a finer one is a fleet re-map:
   `n_terrain`; `aggregate.ANALYSED` (valid median onset, snow class ≠ 4 "ephemeral", WorldCover ∉ {50, 80}) gives
   every onset statistic. The former filters are views: `fcf_lte_50` = FCF classes 0–4 (0 ≤ fcf ≤ 50 exactly),
   `full_dataset` = all classes including "no FCF value".
-- **Reduce** (schema 3): DuckDB sums each unit type over all tiles out of core (`aggregate.reduce_sparse`, ~28 GB
-  of partials per version) into a sparse table; `aggregate.cube` / `aggregate.view` build dense cubes from it.
+- **Reduce** (schema 3): DuckDB sums each unit type over all tiles out of core (`aggregate.reduce_sparse`, ~17 GB
+  of partials for v10) into a sparse table written straight to `sparse_<unit>.parquet` (batches of 500 tiles, then
+  unit-id partitions of ~1 M rows, 2 GB DuckDB memory cap and 4 threads: `GSRO_DUCKDB_MEMORY_LIMIT`,
+  `GSRO_DUCKDB_THREADS`; peak ~3 GB, so it runs on a 16 GB machine). `aggregate.load_sparse` reads a table back summed
+  down to the keys a cube needs, and `aggregate.cube_from_sparse` / `aggregate.view` build dense cubes from it; a
+  cube's unit axis holds the units with analysed pixels in its selection (`view(..., analysed_units_only=False)`
+  keeps the snow-free ones, which carry only terrain counts).
   `tests/validate_schema3.py` checks, on real tiles, that every default cube equals the schema-2 cube with its
   CHILI axis collapsed (counts exactly, means to float32), that DuckDB equals the in-memory reduce, and that the
   histograms and terrain counts add up.

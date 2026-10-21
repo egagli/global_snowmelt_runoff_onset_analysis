@@ -35,8 +35,11 @@ Design (partials schema 3, 2026-10-20; schema 1/2 history in docs/aggregation_li
   ancillary layer ``WTU_SIGNED`` (the WTU id inside the tower polygon, id +
   1000 in its downstream part), so towers and whole basins come from one map.
 - **Reduce.** :func:`reduce_sparse` sums one unit type over all tiles with
-  DuckDB (out of core: ~28 GB of partials per version) into a sparse table,
-  one row per non-empty key combination. :func:`view` turns a sparse table
+  DuckDB (out of core: ~17 GB of partials per version) into a sparse table,
+  one row per non-empty key combination, written straight to parquet (the
+  continents table alone has ~7 M rows x 79 sums, too large for pandas on a
+  16 GB machine). :func:`load_sparse` reads it back summed down to the keys a
+  view needs. :func:`view` turns a sparse table
   into the dense cube a notebook needs, keeping the keys it names and summing
   the others; :func:`cube` builds the named default cubes (:data:`GROUPS`)
   with the old variable names (no ``chili_class`` dimension any more).
@@ -45,7 +48,12 @@ Design (partials schema 3, 2026-10-20; schema 1/2 history in docs/aggregation_li
   reduce is DuckDB + pandas + numpy in a notebook.
 """
 
+import math
 import operator
+import os
+import shutil
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -418,31 +426,124 @@ def _schema3_files(partial_files):
     return keep
 
 
-def reduce_sparse(partial_files, unit_type, histograms=False, threads=None):
+# DuckDB's memory cap (its default is 80 % of RAM, which the reduce exceeds on a 16 GB machine) and the
+# target rows per GROUP BY partition of :func:`reduce_sparse` (each partition's hash table stays ~1 GB)
+DUCKDB_MEMORY_LIMIT = os.environ.get("GSRO_DUCKDB_MEMORY_LIMIT", "2GB")
+DUCKDB_THREADS = int(os.environ.get("GSRO_DUCKDB_THREADS", "4"))   # buffers outside the memory limit grow per thread
+SPARSE_ROWS_PER_PARTITION = 1_000_000
+# files per first-stage batch: DuckDB holds the footers of every file it scans (~0.5 MB each), so the reduce
+# sums batches of tiles into intermediate parquets first, then sums those
+FILES_PER_BATCH = 500
+
+
+def _duckdb_connect(threads=None):
+    """An in-memory DuckDB connection with :data:`DUCKDB_MEMORY_LIMIT` and its own spill directory
+    (returned; the caller removes it)."""
+    import duckdb
+    tmp = tempfile.mkdtemp(prefix="gsro_duckdb_")
+    con = duckdb.connect()
+    con.execute(f"SET memory_limit='{DUCKDB_MEMORY_LIMIT}'")
+    con.execute(f"SET temp_directory='{tmp}'")
+    con.execute("SET preserve_insertion_order=false")
+    con.execute(f"SET threads={int(threads or DUCKDB_THREADS)}")
+    return con, tmp
+
+
+def reduce_sparse(partial_files, unit_type, histograms=False, threads=None, out_path=None):
     """Sum the partials of ``unit_type`` over every tile (DuckDB, out of core) into its SPARSE TABLE: one
     row per non-empty key combination (:data:`KEY_COLS`), the partial-sum columns summed. With
     ``histograms`` the onset-histogram rows instead (``onset_bin`` set). Empty (verified-empty) tiles and
-    older-schema files without the unit type contribute nothing. Returns a pandas DataFrame."""
-    import duckdb
+    older-schema files without the unit type contribute nothing. The GROUP BY runs in partitions of unit
+    ids of about :data:`SPARSE_ROWS_PER_PARTITION` rows each. With ``out_path`` the table is written to
+    that parquet without passing through pandas and the path is returned (read it back with
+    :func:`load_sparse`); without, a pandas DataFrame is returned (small inputs: tests, fixtures)."""
     files = _schema3_files(partial_files)
-    if not files:
-        return pd.DataFrame(columns=KEY_COLS)
-    con = duckdb.connect()
-    if threads:
-        con.execute(f"PRAGMA threads={int(threads)}")
-    rel = con.read_parquet(files, union_by_name=True)
-    cols = rel.columns
-    if "unit_type" not in cols:
-        return pd.DataFrame(columns=KEY_COLS)
-    hist_cols = [c for c in cols if c.startswith("h_")]
-    sum_cols = [c for c in _sum_columns(cols) if (c in hist_cols) == histograms]
     keys = [k for k in KEY_COLS if k != "unit_type"]
-    q = (f"SELECT {', '.join(keys)}, {', '.join(f'SUM({c}) AS {c}' for c in sum_cols)} "
-         f"FROM rel WHERE unit_type = '{unit_type}' AND onset_bin IS {'NOT ' if histograms else ''}NULL "
-         f"GROUP BY {', '.join(keys)}")
-    out = con.execute(q).df()
-    out.insert(0, "unit_type", unit_type)
+    where = f"unit_type = '{unit_type}' AND onset_bin IS {'NOT ' if histograms else ''}NULL"
+    con, tmp = _duckdb_connect(threads)
+
+    def grouped(sources, where, sum_cols, prefix):
+        """GROUP BY the keys over parquet ``sources`` in unit-id partitions; returns the partition files."""
+        rel = con.read_parquet(sources, union_by_name=True)
+        sum_cols = [c for c in sum_cols if c in rel.columns]   # a batch may lack some (e.g. histogram) columns
+        n_keys = con.execute(f"SELECT approx_count_distinct(hash({', '.join(keys)})) FROM rel WHERE {where}").fetchone()[0]
+        n_parts = max(1, math.ceil(n_keys / SPARSE_ROWS_PER_PARTITION))
+        out = []
+        for p in range(n_parts):
+            part = f"((CAST(unit_id AS BIGINT) % {n_parts}) + {n_parts}) % {n_parts} = {p}"
+            q = (f"SELECT '{unit_type}' AS unit_type, {', '.join(keys)}, "
+                 f"{', '.join(f'SUM({c}) AS {c}' for c in sum_cols)} "
+                 f"FROM rel WHERE {where} AND {part} GROUP BY {', '.join(keys)}")
+            out.append(os.path.join(tmp, f"{prefix}_{p}.parquet"))
+            con.execute(f"COPY ({q}) TO '{out[-1]}' (FORMAT parquet)")
+        return out
+
+    try:
+        import pyarrow.parquet as pq
+        cols = list(dict.fromkeys(c for f in files for c in pq.read_schema(f).names))   # the union of the schemas
+        if "unit_type" not in cols:
+            empty = pd.DataFrame(columns=KEY_COLS)
+            if out_path is None:
+                return empty
+            empty.to_parquet(out_path, index=False)
+            return Path(out_path)
+        hist_cols = [c for c in cols if c.startswith("h_")]
+        sum_cols = [c for c in _sum_columns(cols) if (c in hist_cols) == histograms]
+        # stage 1: batches of tiles -> intermediate sums (only when there are more files than one batch)
+        batches = [files[i:i + FILES_PER_BATCH] for i in range(0, len(files), FILES_PER_BATCH)]
+        if len(batches) > 1:
+            sources = [f for b, batch in enumerate(batches) for f in grouped(batch, where, sum_cols, f"batch{b}")]
+            where = "TRUE"                       # the intermediates hold only the selected rows
+        else:
+            sources = files
+        # stage 2: the final sums
+        part_files = grouped(sources, where, sum_cols, "part")
+        union = f"SELECT * FROM read_parquet({part_files!r}, union_by_name = true)"
+        if out_path is None:
+            return con.execute(union).df()
+        con.execute(f"COPY ({union}) TO '{out_path}' (FORMAT parquet)")
+        return Path(out_path)
+    finally:
+        con.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def load_sparse(path, keys, fcf=None, slope=None, perennial=None, threads=None):
+    """A sparse table written by :func:`reduce_sparse` (``out_path``), summed down to ``unit_id`` plus
+    ``keys`` (geometric bins and/or class keys) over the selection ``fcf`` / ``slope`` / ``perennial``
+    (lists of codes; ``None`` = all), in DuckDB. The class keys summed out are recorded in
+    ``df.attrs['presummed_selection']``, which :func:`view` checks against the selection it is asked
+    for. Use it instead of reading the whole table: :func:`view` gives the same cube from either."""
+    keys = list(dict.fromkeys(["unit_id", *keys]))
+    con, tmp = _duckdb_connect(threads)
+    try:
+        rel = con.read_parquet(str(path))
+        sum_cols = [c for c in _sum_columns(rel.columns) if not c.startswith("h_")]
+        where, presummed = [], {}
+        for key, codes in (("fcf_class", fcf), ("slope_class", slope), ("perennial", perennial)):
+            if codes is not None:
+                where.append(f"{key} IN ({', '.join(str(int(c)) for c in codes)})")
+            if key not in keys:
+                presummed[key] = None if codes is None else sorted(int(c) for c in codes)
+        if sum_cols:
+            q = (f"SELECT {', '.join(keys)}, {', '.join(f'SUM({c}) AS {c}' for c in sum_cols)} FROM rel "
+                 f"{'WHERE ' + ' AND '.join(where) if where else ''} GROUP BY {', '.join(keys)}")
+            out = con.execute(q).df()
+        else:                                   # an empty table (no rows of the unit type)
+            out = pd.DataFrame(columns=keys)
+    finally:
+        con.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+    out.attrs["presummed_selection"] = presummed
     return out
+
+
+def cube_from_sparse(path, group, filter_tag, water_years, **kw):
+    """:func:`cube` from a sparse table on disk: :func:`load_sparse` with the group's bins kept and the
+    filter tag's FCF selection applied."""
+    g = GROUPS[group]
+    sparse = load_sparse(path, g["bins"], fcf=FILTER_VIEWS[filter_tag])
+    return cube(sparse, group, filter_tag, water_years, **kw)
 
 
 def sparse_from_frame(partials, unit_type, histograms=False):
@@ -470,7 +571,7 @@ def _unit_ids(sparse, unit_type, basin_level=None):
 
 
 def view(sparse, unit_type, bins, water_years, fcf=FILTER_VIEWS["fcf_lte_50"], slope=None, perennial=None,
-         keep=(), basin_level=None):
+         keep=(), basin_level=None, analysed_units_only=True):
     """A dense cube from a sparse table (:func:`reduce_sparse`): dims ``(<unit_dim>, <bins...>, <keep...>,
     water_year)`` where ``keep`` names class keys to keep as dimensions (``'fcf_class'``,
     ``'slope_class'``, ``'perennial'``); every other key is summed out over the selection
@@ -479,11 +580,18 @@ def view(sparse, unit_type, bins, water_years, fcf=FILTER_VIEWS["fcf_lte_50"], s
     kept) are dropped, as in schema 2. Variables as the schema-2 cubes (``runoff_onset_median``,
     ``..._std``, ``..._n``, ``runoff_onset_mad``, ``temporal_resolution_median``, ``n_years``,
     ``runoff_onset``, ``runoff_onset_anomaly``, ``runoff_onset_n``, ``chili_corr``, ``fcf_corr``) plus
-    ``terrain_n`` (land pixels of the same selection, onset or not), ``chili_mean`` and ``latitude_mean``."""
+    ``terrain_n`` (land pixels of the same selection, onset or not), ``chili_mean`` and ``latitude_mean``.
+    With ``analysed_units_only`` (default) the unit axis holds the units with analysed pixels in the
+    selection, as in schema 2; ``False`` keeps snow-free units too (terrain only, every onset variable NaN)."""
     spec = UNIT_TYPES[unit_type]
     water_years = [int(y) for y in water_years]
+    presummed = sparse.attrs.get("presummed_selection", {})     # class keys load_sparse already summed out
     sel = sparse
     for key, codes in (("fcf_class", fcf), ("slope_class", slope), ("perennial", perennial)):
+        if key in presummed:
+            if (None if codes is None else sorted(int(c) for c in codes)) != presummed[key]:
+                raise ValueError(f"{key} was summed out over {presummed[key]} by load_sparse; this view selects {codes}")
+            continue
         if codes is not None:
             sel = sel[sel[key].isin(list(codes))]
     sel = sel.dropna(subset=list(bins))
@@ -495,6 +603,11 @@ def view(sparse, unit_type, bins, water_years, fcf=FILTER_VIEWS["fcf_lte_50"], s
     keys = ["unit_id", *bins, *keep]
     num_cols = [c for c in _sum_columns(sel.columns) if not c.startswith("h_")]
     sums = sel.groupby(keys, sort=True)[num_cols].sum(min_count=1).reset_index()
+    if analysed_units_only and unit_type != "continents":
+        analysed = sums.groupby("unit_id")["n"].sum()
+        sums = sums[sums["unit_id"].isin(analysed.index[analysed > 0])]
+        if sums.empty:
+            raise ValueError(f"no {unit_type} units with analysed pixels in the selection")
 
     unit_axis = (np.array(CONTINENT_NAMES) if unit_type == "continents" else np.array(sorted(sums["unit_id"].unique())))
     coords = {spec["unit_dim"]: unit_axis}
@@ -635,7 +748,9 @@ def facing_view(sparse, unit_type, bins, water_years, facing, half_width=45.0, m
     not include aspect (the facing set is summed)."""
     if "aspect" in bins:
         raise ValueError("facing_view sums aspect; do not keep it in bins")
-    return view(sparse[facing_mask(sparse, facing, half_width, min_slope_class)], unit_type, bins, water_years, **kw)
+    sub = sparse[facing_mask(sparse, facing, half_width, min_slope_class)]
+    sub.attrs = dict(sparse.attrs)
+    return view(sub, unit_type, bins, water_years, **kw)
 
 
 def add_facing(ds, sparse, unit_type, bins, water_years, half_width=45.0, min_slope_class=1, **kw):

@@ -46,3 +46,6 @@ logs/
 
 # Claude Code agent worktrees / scratch state
 .claude/
+
+# editor workspace files
+*.code-workspace

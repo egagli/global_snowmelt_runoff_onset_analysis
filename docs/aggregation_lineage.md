@@ -427,6 +427,19 @@ exactly, means to float32 precision (stds within 0.01 d: the schema-2 reference 
 histogram counts = analysed FCF ≤ 50 % pixel counts. Sunny–shaded (equator- vs pole-facing, slopes ≥ 10°) against the
 old CHILI warm-minus-cool difference on three mid-latitude tiles: r 0.83–0.98, same sign, slightly larger magnitude.
 
+**Memory (first full reduce, 2026-10-21).** The v10 partials are 17 GB (below the ~28 GB estimate). The sparse
+tables are larger than a 16 GB machine can hold in pandas: continents has 7.0 M key combinations × 79 sums (1.3 GB
+parquet, ~4.6 GB in pandas), mountain ranges 3.8 M, GRDC basins 4.6 M, water towers 3.7 M. Reading every footer of
+4,311 files costs DuckDB ~2.4 GB by itself. So `reduce_sparse` sums batches of 500 tiles into intermediate parquets,
+then sums those in unit-id partitions of ~1 M rows, under a 2 GB DuckDB memory cap with 4 threads, and writes the
+table to parquet without passing through pandas (peak ~3 GB for continents, ~4 min). `load_sparse` reads a table back
+summed to the keys of one cut, which `view` accepts (it checks that the forest-cover / slope / perennial selection the
+loader applied is the one asked for). On the CI fixtures and on 100 real tiles, with batching and partitioning forced,
+every default cube and histogram equals the in-memory path exactly. Because schema 3 keeps snow-free pixels,
+30 GMBA ranges (and many basins) now appear with terrain counts only; a cube's unit axis keeps the units with analysed
+pixels in its selection, which reproduces the schema-2 axes exactly (180 ranges for `fcf_lte_50`, 182 for
+`full_dataset`) and keeps the range display names unchanged.
+
 **What changes for the analyses.** The metrics tables' 100-pixel bin rule now acts on (range, elevation, aspect)
 bins instead of (range, elevation, aspect, CHILI) bins, so more bins pass and the metrics shift slightly; every
 headline number is recomputed after the re-map. Continents' "sunny–shaded" panels use the facing definition above.

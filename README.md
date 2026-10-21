@@ -184,8 +184,10 @@ every input from source to analysis: [docs/aggregation_lineage.md](docs/aggregat
 
 The fleet writes per-tile **partial sums** keyed by unit × geometric bins × three class keys; the aggregation
 notebooks sum them over tiles with DuckDB into one **sparse table** per unit type (`sparse_<unit>.parquet`,
-the master product: one row per non-empty key combination) and write the default **cubes** as views of it
-(`aggregate.UNIT_TYPES` = the map keys, `aggregate.GROUPS` = the cubes, `aggregate.view` = any other cut).
+the master product: one row per non-empty key combination; ~1.3 GB and 7 M rows for continents, so it is read back
+with `aggregate.load_sparse`, summed down to the keys a cut needs, rather than whole) and write the default **cubes**
+as views of it (`aggregate.UNIT_TYPES` = the map keys, `aggregate.GROUPS` = the cubes, `aggregate.view` = any other
+cut).
 
 | key | values |
 | --- | --- |
