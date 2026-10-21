@@ -82,7 +82,8 @@ jobs:
             global_snowmelt_runoff_onset_analysis/analyses/continents/data/geometries/continents.zip
             global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/BasinATLAS_Data_v10.gdb.zip
             global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/GRDC_Major_River_Basins_shp.zip
-          key: vector-sources-v3
+            global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/data_ngs_watertowers.zip
+          key: vector-sources-v4
 
       - name: Create the ancillary repository if missing (or add new layers), fold its ledger, list the incomplete tiles
         id: plan
@@ -136,7 +137,8 @@ jobs:
             global_snowmelt_runoff_onset_analysis/analyses/continents/data/geometries/continents.zip
             global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/BasinATLAS_Data_v10.gdb.zip
             global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/GRDC_Major_River_Basins_shp.zip
-          key: vector-sources-v3
+            global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/data_ngs_watertowers.zip
+          key: vector-sources-v4
 
       - name: Write Earth Engine service key
         run: |

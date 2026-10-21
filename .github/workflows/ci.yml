@@ -54,6 +54,12 @@ jobs:
           path: global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/GRDC_Major_River_Basins_shp.zip
           key: grdc-mrb-2020-shp
 
+      - name: Restore the water-tower zip (990 MB, Immerzeel et al. 2020; the tower names of the water-tower cube)
+        uses: actions/cache@v4
+        with:
+          path: global_snowmelt_runoff_onset_analysis/analyses/river_basins/data/geometries/data_ngs_watertowers.zip
+          key: immerzeel-wtu-2020
+
       - name: Import the package
         working-directory: global_snowmelt_runoff_onset_analysis
         run: pixi run -e ci python -c "import gsro_analysis.aggregate, gsro_analysis.datacube, gsro_analysis.era5; print('ok')"
@@ -79,3 +85,10 @@ jobs:
           test -s "$RUNNER_TEMP/analyses/mountain_ranges/results/v10/mountain_range_metrics.csv"
           test -s "$RUNNER_TEMP/analyses/river_basins/data/aggregation/v10/all_river_basins_fcf_lte_50.nc"
           test -s "$RUNNER_TEMP/analyses/river_basins/results/v10/river_basin_metrics.csv"
+          test -s "$RUNNER_TEMP/analyses/river_basins/results/v10/grdc_basin_metrics.csv"
+          test -s "$RUNNER_TEMP/analyses/river_basins/data/aggregation/v10/all_grdc_basins_fcf_lte_50.nc"
+          test -s "$RUNNER_TEMP/analyses/river_basins/data/aggregation/v10/all_water_towers_fcf_lte_50.nc"
+          test -s "$RUNNER_TEMP/analyses/river_basins/data/aggregation/v10/hist_water_towers.nc"
+          for u in mountain_ranges continents river_basins grdc_basins water_towers; do
+            find "$RUNNER_TEMP/analyses" -name "sparse_${u}.parquet" -size +0 | grep -q . || { echo "no sparse table for $u"; exit 1; }
+          done

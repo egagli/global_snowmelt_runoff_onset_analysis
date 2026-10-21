@@ -62,9 +62,24 @@ free `groupby` at reduce time while a finer one is a fleet re-map:
   basins belong to no GRDC unit. The source shapefile (123 MB) is cached like BasinATLAS; easysnowdata's
   `get_grdc_major_river_basins_of_the_world` is NOT this product (it downloads the World Bank's 254 coarse 2011
   basins).
-- **CHILI** is the fourth key of every unit type; `aggregate.collapse` folds it exactly on read.
-- **Filters** (`aggregate.FILTERS`): `fcf_lte_50` = seasonal snow class ≠ 4 (ephemeral) + WorldCover
-  ∉ {50, 80} + 0 ≤ fcf ≤ 50 (the ≥ 0 bound also drops nodata); `full_dataset` = the first two only.
+- **Water towers** (Immerzeel et al. 2020, Zenodo 3521933) are a fifth unit type, `water_towers`, keyed by the
+  ancillary layer `WTU_SIGNED` (the WTU id 1–78 inside the tower polygon, id + 1000 inside the downstream part of
+  its basin), so a tower and its whole basin come from one map (added 2026-10-20, partials schema 3). The 990 MB
+  source zip is cached like BasinATLAS; `0_aggregate_by_river_basin.ipynb` section 7 writes the cubes and the
+  onset histograms.
+- **Class keys (schema 3, 2026-10-20)** on every unit type: `fcf_class` (11 forest-cover classes), `slope_class`
+  (six 10° classes, 50+ the last) and `perennial` (ESA WorldCover 70). They replace the CHILI key (dropped: slope ×
+  aspect carry what the analyses used it for; the continents' sunny–shaded difference is now equator- vs
+  pole-facing slopes ≥ 10°, `aggregate.facing_view`) and the two filter tags.
+- **Pixels** (schema 3): the pixel table holds every pixel with a DEM. `aggregate.TERRAIN` (not water) gives
+  `n_terrain`; `aggregate.ANALYSED` (valid median onset, snow class ≠ 4 "ephemeral", WorldCover ∉ {50, 80}) gives
+  every onset statistic. The former filters are views: `fcf_lte_50` = FCF classes 0–4 (0 ≤ fcf ≤ 50 exactly),
+  `full_dataset` = all classes including "no FCF value".
+- **Reduce** (schema 3): DuckDB sums each unit type over all tiles out of core (`aggregate.reduce_sparse`, ~28 GB
+  of partials per version) into a sparse table; `aggregate.cube` / `aggregate.view` build dense cubes from it.
+  `tests/validate_schema3.py` checks, on real tiles, that every default cube equals the schema-2 cube with its
+  CHILI axis collapsed (counts exactly, means to float32), that DuckDB equals the in-memory reduce, and that the
+  histograms and terrain counts add up.
 
 Changing a unit definition after the ancillary exists is `datacube.refresh_unit_layers(config, row,
 col, layers=...)` (re-rasterizes the given id layers of a stored tile into the ancillary store, one commit, no

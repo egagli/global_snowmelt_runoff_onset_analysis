@@ -5,7 +5,8 @@ name: "3. Process tiles to parquets"
 # tabulated and the tile's PARTIAL SUMS parquet is written (pipeline/scripts/process_tiles_batch.py
 # -> datacube.process_tile); the per-pixel parquet is opt-in (keep_pixels). The plan job lists the
 # tiles with complete ancillary whose partials blob is missing or stamped with an older schema than
-# aggregate.PARTIALS_SCHEMA (re-mapped in place; 2 = + grdc_basins, 2026-10-09); tiles with
+# aggregate.PARTIALS_SCHEMA (re-mapped in place; 2 = + grdc_basins, 2026-10-09; 3 = terrain counts,
+# forest / slope / perennial keys, water towers, histograms, 2026-10-20); tiles with
 # incomplete ancillary are never dispatched. Failure = no output = re-listed next dispatch; re-dispatch until the plan job
 # reports 0 remaining. `start_fresh` (off by default) DELETES the version's partials and pixel
 # tables first: the only deletion this workflow can make. No Earth Engine: every external source is

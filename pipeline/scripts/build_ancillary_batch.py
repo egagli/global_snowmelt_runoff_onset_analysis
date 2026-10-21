@@ -67,6 +67,7 @@ def main():
     settings.continents_zip()
     settings.basin_atlas_gdb()
     settings.grdc_mrb_zip()
+    settings.water_towers_zip()          # 990 MB, schema 3 (WTU_SIGNED)
 
     repo = datacube.open_ancillary_repo(config, args.local_store)
     committed = datacube.committed_ancillary_layers(repo)

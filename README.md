@@ -180,23 +180,42 @@ every input from source to analysis: [docs/aggregation_lineage.md](docs/aggregat
 | Fleet work list | **local, tracked** `pipeline/tile_data/ancillary_tiles_v10.txt` | `pipeline/pipeline.ipynb` from the store's commit history | SAS token |
 | Label layout of the two world maps | **local, tracked** `analyses/mountain_ranges/label_layout.csv` | curated by hand (the one input that is neither data nor code) | — |
 
-### The aggregate schema
+### The aggregate schema (partials schema 3, 2026-10-20)
 
-One schema for every unit type (`aggregate.UNIT_TYPES` = the map keys, `aggregate.GROUPS` = the cubes):
+The fleet writes per-tile **partial sums** keyed by unit × geometric bins × three class keys; the aggregation
+notebooks sum them over tiles with DuckDB into one **sparse table** per unit type (`sparse_<unit>.parquet`,
+the master product: one row per non-empty key combination) and write the default **cubes** as views of it
+(`aggregate.UNIT_TYPES` = the map keys, `aggregate.GROUPS` = the cubes, `aggregate.view` = any other cut).
+
+| key | values |
+| --- | --- |
+| unit | `mountain_ranges` (GMBA_V2_ID), `river_basins` (HydroBASINS level-6 PFAF_ID), `continents`, `grdc_basins` (GRDC MRBID), `water_towers` (Immerzeel et al. 2020: WTU id inside the tower, id + 1000 downstream) |
+| geometric bins | elevation 100 m; aspect 15° (NaN for flat pixels; not for river basins); latitude 1° (continents) |
+| `fcf_class` | forest cover 0–10, (10, 20], …, (90, 100] %, none (`aggregate.FCF_CLASSES`) |
+| `slope_class` | 0–10, 10–20, 20–30, 30–40, 40–50, 50+ ° (`aggregate.SLOPE_CLASSES`) |
+| `perennial` | ESA WorldCover class 70 (permanent snow and ice) or not |
+
+Every row carries `n_terrain` (land pixels, onset or not: the terrain hypsometry) and, over the **analysed**
+pixels (valid 11-yr median onset, not the "ephemeral" snow class, not built-up or water), the onset sums: median,
+MAD, temporal resolution, years per pixel, latitude, CHILI and forest-cover correlation sums, and per water year the
+onset and anomaly sums. Histogram rows (`hist_<unit>.parquet`) count the 11-yr median and each year's onset in 5-day
+bins per unit × elevation × perennial (ranges, GRDC basins, water towers; FCF ≤ 50 %).
 
 | cube | dims | extras merged by the aggregation notebook |
 | --- | --- | --- |
-| `mountain_ranges` | `mountain_range × elevation(100 m) × aspect(15°) × chili_class × water_year` | GMBA_V2_ID, centroid, continent; ERA5-Land anomaly zonal means `(range, water_year, month)` |
-| `river_basins` (HydroBASINS level 5, derived from the stored level-6 ids) | `river_basin × elevation × chili_class × water_year` | ERA5-Land zonal means `(basin, water_year, month)` |
-| `continents` | `continent × latitude(1°) × elevation × chili_class × water_year` | `dem_pixel_count` (GTOPO30 land histogram) |
-| on request: `river_basins_l6`, `continents_aspect` | level-6 basins; `continent × latitude × elevation × aspect × …` | as above |
+| `mountain_ranges` | `mountain_range × elevation × aspect × water_year` | GMBA_V2_ID, centroid, continent; ERA5-Land anomaly zonal means `(range, water_year, month)` |
+| `river_basins` (level 5, derived from the stored level-6 ids) | `river_basin × elevation × water_year` | ERA5-Land zonal means |
+| `continents` | `continent × latitude × elevation × water_year` | `dem_pixel_count` (GTOPO30); `sunny_*` / `shaded_*` (equator- vs pole-facing slopes ≥ 10°) |
+| `grdc_basins`, `water_towers` | `<unit> × elevation (× aspect) × water_year` | names, continent / sea; tower vs downstream part |
+| on request: `river_basins_l6`, `continents_aspect`, `grdc_basins_aspect`, or any `aggregate.view(...)` | | |
 
-Variables: `runoff_onset_median`, `runoff_onset_mad`, `temporal_resolution_median` (static),
-`runoff_onset`, `runoff_onset_anomaly` (per water year), each as the bin **mean** with `<var>_std` and
-`<var>_n`; `n_years`; `chili_corr`, `fcf_corr`. Nothing is precomputed: whole-basin means, elevation
-profiles and range mean anomalies are `aggregate.weighted_mean(ds, var, dims)`; `aggregate.collapse`
-folds the CHILI axis exactly; `aggregate.threshold` masks thin bins. The analyses' masking rules are
-written out in the notebooks themselves (the same block at the top of every mountain-range notebook).
+The two former filter tags are selections on `fcf_class` (`aggregate.FILTER_VIEWS`): `fcf_lte_50` = classes 0–4,
+`full_dataset` = all. CHILI is no longer a key (it was until schema 2); its mean (`chili_mean`) and correlation
+(`chili_corr`) remain. Variables: `runoff_onset_median`, `runoff_onset_mad`, `temporal_resolution_median` (static),
+`runoff_onset`, `runoff_onset_anomaly` (per water year), each as the cell **mean** with `<var>_std` and `<var>_n`;
+`n_years`, `terrain_n`, `latitude_mean`, `chili_mean`, `chili_corr`, `fcf_corr`. Marginals are
+`aggregate.weighted_mean(ds, var, dims)`; `aggregate.threshold` masks thin cells. The analyses' masking rules are
+written out in the notebooks themselves.
 
 ## Running a dataset version
 

@@ -399,3 +399,34 @@ HydroBASINS pixel counts are equal, in the Rainier tile GRDC holds 80 % (the res
 basins outside the 520). The river-basin notebook runs on old-schema partials (GRDC section skips) and on
 schema-2 partials (writes the cubes and the metrics table).
 
+
+
+## Partials schema 3 (2026-10-20)
+
+**What changed.** The map keeps every pixel with a DEM (the onset-only `dropna` is gone) and keys rows by unit ×
+geometric bins × `fcf_class` × `slope_class` × `perennial`; CHILI is no longer a key and the two filter tags
+(`fcf_lte_50`, `full_dataset`) are gone, both being selections on `fcf_class`. New columns: `n_terrain` (land pixels
+of the key, onset or not), `s_lat` / `ss_lat` (latitude moments of the analysed pixels). New row kind: onset
+histograms (`onset_bin` set; `h_med`, `h_<year>`) for mountain ranges, GRDC basins and water towers. New unit type
+`water_towers` from the ancillary layer `WTU_SIGNED` (Immerzeel et al. 2020). The reduce writes sparse tables with
+DuckDB; cubes are views.
+
+**Why.** Terrain hypsometry from the pipeline's own DEM (the snow-free part of each range and band); forest-cover
+thresholds at reduce time (sensitivity tables, a proper forest-vs-open comparison); slope classes (does aspect control
+scale with slope; Sentinel-1 quality on steep terrain; avalanche terrain); a perennial-snow flag (seasonal and
+perennial regimes reported separately rather than filtered); snow-weighted latitude; exact onset distributions;
+water towers at 80 m with their whole basins.
+
+**Cost** (measured on six v10 tiles spanning the size distribution, scaled to 4,320 tiles): partials 3.9 GB → ~28 GB
+(rows ×10; largest tile ~58 MB). Dense cubes with every key would be ~130× today's, hence the sparse tables.
+
+**Validation** (`tests/validate_schema3.py`, six tiles: 027_190, 009_213, 015_225, 022_039, 025_127, 032_170): every
+default group under both former filters equals the schema-2 cube with its CHILI axis collapsed — pixel counts
+exactly, means to float32 precision (stds within 0.01 d: the schema-2 reference pools float32 per-CHILI stds) —
+`continents_aspect` excluded only for memory; DuckDB reduce = in-memory reduce; analysed ≤ terrain everywhere;
+histogram counts = analysed FCF ≤ 50 % pixel counts. Sunny–shaded (equator- vs pole-facing, slopes ≥ 10°) against the
+old CHILI warm-minus-cool difference on three mid-latitude tiles: r 0.83–0.98, same sign, slightly larger magnitude.
+
+**What changes for the analyses.** The metrics tables' 100-pixel bin rule now acts on (range, elevation, aspect)
+bins instead of (range, elevation, aspect, CHILI) bins, so more bins pass and the metrics shift slightly; every
+headline number is recomputed after the re-map. Continents' "sunny–shaded" panels use the facing definition above.

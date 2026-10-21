@@ -165,7 +165,7 @@ def add_forest_cover(tile,ds,mask_nodata=True):
 
 # the vector unit-id layers (rasterized from cached polygons, no Earth Engine); a refresh can
 # rebuild any subset of them without touching the raster layers
-UNIT_ID_LAYERS = ('GMBA_V2_ID', 'PFAF_ID', 'continent', 'GRDC_MRBID')
+UNIT_ID_LAYERS = ('GMBA_V2_ID', 'PFAF_ID', 'continent', 'GRDC_MRBID', 'WTU_SIGNED')
 
 
 def _rasterize_ids(tile, ds, gdf, column, name, dtype, log):
@@ -203,6 +203,12 @@ def add_mountain_range_and_basin_and_continent(tile, ds, log=print, layers=UNIT_
     if 'GRDC_MRBID' in layers:
         grdc_gdf = settings.grdc_mrb_basins(mask=tile.bbox_gdf)   # make_valid applied (55 invalid rings in the source)
         ds = _rasterize_ids(tile, ds, grdc_gdf, 'MRBID', 'GRDC_MRBID', np.int16, log)
+
+    if 'WTU_SIGNED' in layers:
+        # Immerzeel et al. (2020) water towers: the WTU id inside the tower polygon, id + 1000 in the
+        # downstream part of its basin (one layer -> towers and whole basins from one map)
+        wtu_gdf = settings.water_towers_signed(mask=tile.bbox_gdf)
+        ds = _rasterize_ids(tile, ds, wtu_gdf, 'WTU_SIGNED', 'WTU_SIGNED', np.int16, log)
 
     if 'continent' in layers:
         from geocube.api.core import make_geocube
@@ -277,16 +283,16 @@ LAYER_LAT_COVERAGE = {
 # ---------------------------------------------------------------------------
 # the ancillary store: one icechunk repository per grid generation on the dataset grid
 
-# the nine layers fetched from their sources and stored on the dataset grid (GRDC_MRBID added
-# 2026-10-09; an older repository gets it through ensure_ancillary_layers + a unit-layer refresh)
+# the ten layers fetched from their sources and stored on the dataset grid (GRDC_MRBID added 2026-10-09,
+# WTU_SIGNED 2026-10-20; an older repository gets them through ensure_ancillary_layers + a unit-layer refresh)
 ANCILLARY_LAYERS = ('dem', 'chili', 'snow_classification', 'esa_worldcover',
-                    'forest_cover_fraction', 'GMBA_V2_ID', 'PFAF_ID', 'continent', 'GRDC_MRBID')
+                    'forest_cover_fraction', 'GMBA_V2_ID', 'PFAF_ID', 'continent', 'GRDC_MRBID', 'WTU_SIGNED')
 # derived at process time from the UTM-reprojected DEM (they need a metric grid)
 DERIVED_LAYERS = ('aspect', 'slope')
 # every ancillary column of the pixel table
 ANCILLARY_VARS = ('dem', 'aspect', 'slope', 'chili', 'snow_classification',
                   'esa_worldcover', 'forest_cover_fraction', 'GMBA_V2_ID',
-                  'PFAF_ID', 'continent', 'GRDC_MRBID')
+                  'PFAF_ID', 'continent', 'GRDC_MRBID', 'WTU_SIGNED')
 
 # Compact on-disk encodings (CF scale/offset + _FillValue, so the DECODED values are what
 # tabulate_tile sees: chili quantized to 1e-4, nodata -> NaN). ~56 MB raw per tile.
@@ -301,6 +307,7 @@ ANCILLARY_ENCODING = {
     'PFAF_ID':               {'dtype': 'int32', '_FillValue': -9999},
     'continent':             {'dtype': 'int8', '_FillValue': -1},   # -1 = geocube's no-category code
     'GRDC_MRBID':            {'dtype': 'int16', '_FillValue': -9999},   # 4-digit GRDC MRBID (1201-6xxx)
+    'WTU_SIGNED':            {'dtype': 'int16', '_FillValue': -9999},   # WTU id 1-78 (tower), id + 1000 (downstream)
 }
 LAYER_ATTRS = {
     'dem': {'long_name': 'Copernicus DEM GLO-30 elevation', 'units': 'm'},
@@ -314,6 +321,8 @@ LAYER_ATTRS = {
     'continent': {'long_name': 'continent index (see continent_enum)'},
     'GRDC_MRBID': {'long_name': 'GRDC Major River Basins of the World (2020) MRBID',
                    'source': settings.GRDC_MRB_URL, 'citation': settings.GRDC_MRB_CITATION},
+    'WTU_SIGNED': {'long_name': 'Immerzeel et al. (2020) water tower unit: WTU id in the tower, id + 1000 downstream',
+                   'source': settings.WTU_URL, 'citation': settings.WTU_CITATION},
 }
 # how each stored layer moves from the dataset grid onto the 80 m UTM grid at process time
 UTM_RESAMPLING = {
@@ -326,6 +335,7 @@ UTM_RESAMPLING = {
     'PFAF_ID': rasterio.enums.Resampling.nearest,
     'continent': rasterio.enums.Resampling.nearest,
     'GRDC_MRBID': rasterio.enums.Resampling.nearest,
+    'WTU_SIGNED': rasterio.enums.Resampling.nearest,
 }
 KIND_ANCILLARY_TILE = 'ancillary_tile'
 
@@ -732,7 +742,7 @@ def tabulate_tile(config, row, col, ancillary_window, global_ds=None):
     anc = xr.Dataset()
     for name in ANCILLARY_LAYERS:
         da = ancillary_window[name].astype(np.float32)
-        if name in ('GMBA_V2_ID', 'PFAF_ID', 'GRDC_MRBID'):
+        if name in ('GMBA_V2_ID', 'PFAF_ID', 'GRDC_MRBID', 'WTU_SIGNED'):
             da = da.fillna(-9999.0)          # nodata as the integer sentinel tabulate expects
         anc[name] = da.rio.write_nodata(np.nan).rio.reproject_match(template, resampling=UTM_RESAMPLING[name])
     anc['aspect'], anc['slope'] = terrain_derivatives(anc['dem'])
@@ -742,8 +752,10 @@ def tabulate_tile(config, row, col, ancillary_window, global_ds=None):
                       combine_attrs='drop_conflicts')
 
     water_years = [int(y) for y in config.water_years]
+    # every pixel with a DEM, onset or not (partials schema 3: the terrain counts need the snow-free pixels;
+    # aggregate.ANALYSED selects the onset pixels in the map)
     df = (joined.to_dataframe().reset_index()
-          .dropna(subset='runoff_onset_median'))
+          .dropna(subset='dem'))
     df = df.drop(columns=[c for c in ('spatial_ref',) if c in df])
     df['tile_row'] = row
     df['tile_col'] = col
@@ -753,17 +765,17 @@ def tabulate_tile(config, row, col, ancillary_window, global_ds=None):
             + ["runoff_onset_median", "temporal_resolution_median",
                "runoff_onset_mad", "dem", "aspect", "slope", "chili",
                "snow_classification", "esa_worldcover",
-               "forest_cover_fraction", "GMBA_V2_ID", "PFAF_ID", "continent", "GRDC_MRBID"]]
+               "forest_cover_fraction", "GMBA_V2_ID", "PFAF_ID", "continent", "GRDC_MRBID", "WTU_SIGNED"]]
 
     int_cols = wy_cols + ["tile_row", "tile_col", "runoff_onset_median",
                           "dem", "aspect", "slope", "snow_classification",
                           "esa_worldcover", "forest_cover_fraction",
-                          "GMBA_V2_ID", "continent", "GRDC_MRBID"]
+                          "GMBA_V2_ID", "continent", "GRDC_MRBID", "WTU_SIGNED"]
     df[int_cols] = (df[int_cols].replace([np.inf, -np.inf, np.nan], -9999)
                     .round().astype(np.int32))
     for c in ("tile_row", "tile_col", "runoff_onset_median", "dem", "aspect",
               "slope", "snow_classification", "esa_worldcover",
-              "forest_cover_fraction", "continent", "GRDC_MRBID"):
+              "forest_cover_fraction", "continent", "GRDC_MRBID", "WTU_SIGNED"):
         df[c] = df[c].astype(np.int16)
     df["PFAF_ID"] = (df["PFAF_ID"].replace([np.inf, -np.inf, np.nan], -9999)
                      .astype(np.int32))
@@ -857,22 +869,22 @@ def partials_tile_current(config, row, col):
     return fs.exists(path) and partials_schema_of(fs, path) == aggregate.PARTIALS_SCHEMA
 
 
-def write_partials(df, config, row, col, filter_tags=None, log=None):
+def write_partials(df, config, row, col, log=None):
     log = log or logger.info
     """Partial sums of a tile's pixel table -> partials_tile_path() (single
     blob). Returns the number of partial rows."""
     from gsro_analysis import aggregate
 
-    partials = aggregate.tile_partials(df, config.water_years, filter_tags=filter_tags)
+    partials = aggregate.tile_partials(df, config.water_years)
     partials.insert(0, 'tile_col', np.int16(col))
     partials.insert(0, 'tile_row', np.int16(row))
     path = partials_tile_path(config, row, col)
     write_partials_parquet(partials, path, config.azure_blob_fs)
     if len(partials):
         log(f"tile {row},{col}: map — {len(partials):,} partial rows "
-            f"({partials['filter_tag'].nunique()} filters x {partials['unit_type'].nunique()} unit types) -> {path}")
-    else:   # a verified-empty tile (no pixel with a valid median passed the filters): the empty blob IS the result
-        log(f"tile {row},{col}: map — 0 partial rows (no pixel with a valid median) -> empty {path}")
+            f"({partials['unit_type'].nunique()} unit types, {int(partials['onset_bin'].notna().sum()):,} histogram rows) -> {path}")
+    else:   # a verified-empty tile (no land pixel in any unit): the empty blob IS the result
+        log(f"tile {row},{col}: map — 0 partial rows (no land pixel in any unit) -> empty {path}")
     return len(partials)
 
 
@@ -896,7 +908,7 @@ def write_partials_parquet(partials, path, fs=None):
             pq.write_table(table, f, compression='zstd')
 
 
-def partials_from_pixel_table(config, row, col, filter_tags=None):
+def partials_from_pixel_table(config, row, col):
     """Backfill a tile's partials from an existing pixel parquet (no store
     read, no Earth Engine) — for tiles tabulated before the partials
     existed, e.g. the v10 dry-run set. The pixel table carries every column
@@ -904,7 +916,7 @@ def partials_from_pixel_table(config, row, col, filter_tags=None):
     import pandas as pd
     df = pd.read_parquet(parquet_tile_path(config, row, col),
                          filesystem=config.azure_blob_fs)
-    return write_partials(df, config, row, col, filter_tags=filter_tags)
+    return write_partials(df, config, row, col)
 
 
 # ---------------------------------------------------------------------------
@@ -962,7 +974,7 @@ def reset_version(config, what=('partials', 'pixel_tables', 'ancillary_grid'),
 
 
 def process_tile(config, row, col, global_ds=None, keep_pixels=False,
-                 filter_tags=None, log=None, repo=None):
+                 log=None, repo=None):
     """The whole per-tile job of 'Process tiles to parquets': the ancillary window (must have
     a commit) and the store window -> the 80 m UTM grid -> pixel table -> partial sums
     written to partials_tile_path(); the pixel table itself only with ``keep_pixels``.
@@ -983,10 +995,10 @@ def process_tile(config, row, col, global_ds=None, keep_pixels=False,
     shape = df.attrs.get('utm_shape', ('?', '?'))
     log(f"tile {row},{col}: tabulate: store window ({len(config.water_years)} water years + medians) and "
         f"ancillary window reprojected onto the {df.attrs.get('utm_crs')} 80 m grid "
-        f"({shape[0]} x {shape[1]} px), slope + aspect derived, {len(df):,} pixels with a valid median "
+        f"({shape[0]} x {shape[1]} px), slope + aspect derived, {len(df):,} pixels with a DEM, {int((df.runoff_onset_median > 0).sum()):,} with a valid median "
         f"({time.time() - t1:.0f}s)")
     if keep_pixels:
         save_pixel_table(df, config, row, col)
         log(f"tile {row},{col}:   pixel table written -> {parquet_tile_path(config, row, col)}")
-    n_rows = write_partials(df, config, row, col, filter_tags=filter_tags, log=log)
+    n_rows = write_partials(df, config, row, col, log=log)
     return len(df), n_rows

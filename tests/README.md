@@ -1,9 +1,10 @@
 # tests
 
-`fixtures/partials/v10/` holds the partial-sum parquets of two v10 dry-run tiles (001_183: basins and a continent only;
-094_077: two mountain ranges as well), written by the fleet map on 2026-09-03 with the current schema (HydroBASINS level-6
-basin ids, the continents aspect key, the `fcf_lte_50` and `full_dataset` filter tags). They are the input of the smoke
-test in `.github/workflows/ci.yml`: install the `ci` environment, import the package, and execute the three aggregation
+`fixtures/partials/v10/` holds the partial-sum parquets (partials schema 3) of two v10 tiles: 033_198 (Qin Ling: Huai He,
+Yellow River, a mountain range, two water-tower parts) and 053_070 (Colombian Andes: Magdalena, San Juan), all five unit
+types, built by `tests/build_fixtures.py` on 2026-10-20 (read-only: the ancillary and store windows, with the
+`WTU_SIGNED` layer rasterized in memory before its fleet wave). They are the input of the smoke test in
+`.github/workflows/ci.yml`: install the `ci` environment, import the package, and execute the three aggregation
 notebooks headlessly on them without any credential (the partials download and the ERA5-Land step skip themselves when
 no SAS token is present):
 
@@ -17,7 +18,10 @@ GSRO_PARTIALS_ROOT=tests/fixtures/partials GSRO_OUTPUT_ROOT=/tmp/ci/analyses \
 which must write the cubes under `/tmp/ci/analyses/<unit>/data/aggregation/v10/` and the two metrics tables under
 `/tmp/ci/analyses/<unit>/results/v10/`. GMBA and the USGS continents are read from the web; the BasinATLAS gdb (2.7 GB)
 is downloaded into `analyses/river_basins/data/geometries/` on first use and restored from the Actions cache afterwards;
-the GTOPO30 histogram and the level-6 population table are tracked. Regenerate the fixtures by copying two tiles from
-`partials/<version>/` after a schema change. The current fixtures are partials schema 1 (no `grdc_basins` rows;
-the GRDC section of the river-basin notebook reports that and skips): replace them after the 2026-10-09 re-map,
-choosing tiles with GRDC basins (e.g. 025_127, the Alps: Po, Rhine, Rhône).
+the GTOPO30 histogram and the level-6 population table are tracked. Regenerate the fixtures with
+`tests/build_fixtures.py <tiles>` after a schema change (or copy two tiles from `partials/<version>/` once the fleet has
+re-mapped). To run the smoke test locally without your SAS token being picked up, put a clone of the production repo
+without `config/sas_token.txt` first on `PYTHONPATH`.
+
+`validate_schema3.py <old aggregate.py> <pixel tables...>` checks the schema-3 map and reduce against the schema-2 code
+on real pixel tables (see `docs/aggregation_lineage.md`).

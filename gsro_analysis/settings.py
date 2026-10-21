@@ -172,6 +172,52 @@ GRDC_MRB_CITATION = ("GRDC (2020): GRDC Major River Basins. Global Runoff Data C
                      "Koblenz: Federal Institute of Hydrology (BfG).")
 
 
+# Immerzeel et al. (2020) water towers: Zenodo 10.5281/zenodo.3521933 (CC BY 4.0), one 990 MB zip
+# (the per-file URLs return HTML). The fleet stores WTU_SIGNED per pixel: the WTU id (1-78) inside the
+# tower polygon (WTU_vector: the mountain part of the basin), id + 1000 inside its downstream part
+# (downstream_vector); tower + downstream = the whole basin (to within 1.2 % of area). Added 2026-10-20.
+WTU_URL = "https://zenodo.org/api/records/3521933/files/data_ngs_watertowers.zip/content"
+WTU_ZIP_NAME = "data_ngs_watertowers.zip"
+WTU_MD5 = "cc87a1339b64ab185b4e88eaf6343168"            # from the Zenodo API, checked 2026-10-20
+WTU_TOWER_MEMBER = "WTU_units/WTU_vector.shp"            # paths inside the zip (see water_towers_signed)
+WTU_DOWNSTREAM_MEMBER = "WTU_units/downstream_vector.shp"
+WTU_DOWNSTREAM_OFFSET = 1000
+WTU_CITATION = ("Immerzeel, W. W. et al. (2020): Importance and vulnerability of the world's water towers. "
+                "Nature 577, 364-369. Data: Zenodo, doi:10.5281/zenodo.3521933.")
+
+
+def water_towers_zip():
+    """The water-tower zip (990 MB), downloaded once (md5-checked) into ``analyses/river_basins/data/geometries/``."""
+    from gsro_analysis import paths
+    return cached_source(WTU_URL, filename=WTU_ZIP_NAME, expected_md5=WTU_MD5, dest_dir=paths.geometries('river_basins'))
+
+
+def water_tower_specs():
+    """WTU_specs.csv from the water-tower zip (Latin-1), indexed by WTU_ID: names (WTU_name, WTU_name_short),
+    continent, tower / downstream / basin areas (km2)."""
+    import zipfile
+    import pandas as pd
+    with zipfile.ZipFile(water_towers_zip()) as z, z.open("WTU_units/WTU_specs.csv") as f:
+        return pd.read_csv(f, encoding="latin-1", index_col=0).set_index("WTU_ID")
+
+
+def water_towers_signed(mask=None):
+    """Tower and downstream polygons with one signed id column ``WTU_SIGNED`` (tower = WTU_ID, downstream =
+    WTU_ID + :data:`WTU_DOWNSTREAM_OFFSET`), towers LAST so they win any overlap when rasterized."""
+    import geopandas as gpd
+    import pandas as pd
+    z = water_towers_zip()
+    out = []
+    for member, offset in ((WTU_DOWNSTREAM_MEMBER, WTU_DOWNSTREAM_OFFSET), (WTU_TOWER_MEMBER, 0)):
+        gdf = gpd.read_file(f"zip://{z}!{member}", mask=mask)
+        idc = next(c for c in gdf.columns if c.upper().endswith("WTU_ID") or c.upper() == "WTU_ID")
+        gdf = gdf[[idc, "geometry"]].rename(columns={idc: "WTU_SIGNED"})
+        gdf["WTU_SIGNED"] = gdf["WTU_SIGNED"].astype("int64") + offset
+        gdf["geometry"] = gdf.geometry.make_valid()
+        out.append(gdf)
+    return gpd.GeoDataFrame(pd.concat(out, ignore_index=True), crs=out[-1].crs).to_crs(4326)
+
+
 def grdc_mrb_zip():
     """The GRDC Major River Basins shapefile zip (123 MB: basins + river networks), downloaded once
     (md5-checked) into ``analyses/river_basins/data/geometries/``; the fleet and the notebooks read the
