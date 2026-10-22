@@ -16,9 +16,12 @@ snow_pct_of_terrain,%,snow_km2 / terrain_km2
 polygon_km2,km²,GMBA polygon area (EPSG:6933)
 snow_pct_of_polygon,%,snow_km2 / polygon_km2: the inclusion quantity
 included,,has metrics and snow_pct_of_polygon >= 2.0 %
-sunny_shady_d,days,2A of the cosine fit of elevation-removed onset against aspect (11-year median fields)
+sunny_shady_d,days,"2A of the cosine fit of window-relative onset (against the other aspects of the same 10 km window and 100 m band) against aspect, 11-year median fields; band-median-removed onset over the whole range for cubes before partials schema 4"
 earliest_aspect_deg,degrees from north,aspect of the earliest onset in that fit
 aspect_fit_r2,,r² of the cosine fit
+sunny_shady_pooled_d,days,the same 2A from the range-wide profile (band onset minus its median across aspects over the whole range)
+earliest_aspect_pooled_deg,degrees from north,aspect of the earliest onset in the range-wide fit
+pooling_share,,"pixel-weighted mean square of (range-wide - window-relative elevation-normalized timing) over that of the range-wide field: ~0 = the range-wide profile is aspect, > 0.5 = mostly location"
 n_years,,water years with a range-year anomaly
 anomaly_sd,days,interannual s.d. of the range-year anomaly (>= 8 years)
 anomaly_spread,days,max - min range-year anomaly (>= 8 years)
@@ -90,17 +93,17 @@ spring_temperature_anomaly_WY2022,°C,mean spring 2 m temperature anomaly of the
 spring_temperature_anomaly_WY2023,°C,mean spring 2 m temperature anomaly of the year (ERA5-Land zonal mean)
 spring_temperature_anomaly_WY2024,°C,mean spring 2 m temperature anomaly of the year (ERA5-Land zonal mean)
 spring_temperature_anomaly_WY2025,°C,mean spring 2 m temperature anomaly of the year (ERA5-Land zonal mean)
-sunny_shady_d_WY2015,days,sunny-shady difference (2A) of the year
-sunny_shady_d_WY2016,days,sunny-shady difference (2A) of the year
-sunny_shady_d_WY2017,days,sunny-shady difference (2A) of the year
-sunny_shady_d_WY2018,days,sunny-shady difference (2A) of the year
-sunny_shady_d_WY2019,days,sunny-shady difference (2A) of the year
-sunny_shady_d_WY2020,days,sunny-shady difference (2A) of the year
-sunny_shady_d_WY2021,days,sunny-shady difference (2A) of the year
-sunny_shady_d_WY2022,days,sunny-shady difference (2A) of the year
-sunny_shady_d_WY2023,days,sunny-shady difference (2A) of the year
-sunny_shady_d_WY2024,days,sunny-shady difference (2A) of the year
-sunny_shady_d_WY2025,days,sunny-shady difference (2A) of the year
+sunny_shady_d_WY2015,days,"sunny-shady difference (2A) of the year, from the window-relative onset of the year"
+sunny_shady_d_WY2016,days,"sunny-shady difference (2A) of the year, from the window-relative onset of the year"
+sunny_shady_d_WY2017,days,"sunny-shady difference (2A) of the year, from the window-relative onset of the year"
+sunny_shady_d_WY2018,days,"sunny-shady difference (2A) of the year, from the window-relative onset of the year"
+sunny_shady_d_WY2019,days,"sunny-shady difference (2A) of the year, from the window-relative onset of the year"
+sunny_shady_d_WY2020,days,"sunny-shady difference (2A) of the year, from the window-relative onset of the year"
+sunny_shady_d_WY2021,days,"sunny-shady difference (2A) of the year, from the window-relative onset of the year"
+sunny_shady_d_WY2022,days,"sunny-shady difference (2A) of the year, from the window-relative onset of the year"
+sunny_shady_d_WY2023,days,"sunny-shady difference (2A) of the year, from the window-relative onset of the year"
+sunny_shady_d_WY2024,days,"sunny-shady difference (2A) of the year, from the window-relative onset of the year"
+sunny_shady_d_WY2025,days,"sunny-shady difference (2A) of the year, from the window-relative onset of the year"
 lapse_rate_per_100m_WY2015,days per 100 m,lapse rate of the year
 lapse_rate_per_100m_WY2016,days per 100 m,lapse rate of the year
 lapse_rate_per_100m_WY2017,days per 100 m,lapse rate of the year

@@ -32,7 +32,7 @@
   2.58,
   4.76
  ],
- "median_sunny_shady_d": 7.8,
+ "median_sunny_shady_d": 8.3,
  "median_anomaly_sd": 8.8,
  "by_abs_latitude_band": {
   "0-35": {
@@ -40,7 +40,7 @@
    "median_slope": -4.85,
    "pct_sig": 53.33,
    "median_lapse": 3.03,
-   "median_sunny_shady": 7.18,
+   "median_sunny_shady": 8.6,
    "median_onset": 172.48
   },
   "35-50": {
@@ -48,7 +48,7 @@
    "median_slope": -6.8,
    "pct_sig": 69.35,
    "median_lapse": 3.82,
-   "median_sunny_shady": 6.42,
+   "median_sunny_shady": 6.71,
    "median_onset": 161.2
   },
   "50-60": {
@@ -56,7 +56,7 @@
    "median_slope": -4.54,
    "pct_sig": 38.46,
    "median_lapse": 4.05,
-   "median_sunny_shady": 11.13,
+   "median_sunny_shady": 8.69,
    "median_onset": 204.72
   },
   "60-90": {
@@ -64,7 +64,7 @@
    "median_slope": -2.4,
    "pct_sig": 25.0,
    "median_lapse": 3.34,
-   "median_sunny_shady": 12.83,
+   "median_sunny_shady": 11.73,
    "median_onset": 213.61
   }
  },
@@ -77,8 +77,8 @@
   6.57
  ],
  "sunny_shady_p5_p95": [
-  1.81,
-  17.51
+  1.4,
+  17.0
  ],
  "anomaly_sd_iqr": [
   6.7,
@@ -122,9 +122,9 @@
  "interannual_topography": {
   "n_ranges": 99,
   "median_lapse_rate_sd": 0.99,
-  "median_sunny_shady_sd": 2.89,
+  "median_sunny_shady_sd": 2.96,
   "lapse_rate_cv_pct": 27,
-  "sunny_shady_cv_pct": 34
+  "sunny_shady_cv_pct": 35
  },
  "field_significance": {
   "obs_sig_neg": 67,
@@ -139,12 +139,12 @@
  },
  "lapse_aspect_covariation": {
   "n_ranges": 99,
-  "median_r": 0.272,
-  "frac_positive": 0.758,
-  "n_p_lt_005": 18,
-  "null_median_r_p95": 0.069,
+  "median_r": 0.323,
+  "frac_positive": 0.768,
+  "n_p_lt_005": 21,
+  "null_median_r_p95": 0.068,
   "p_median_r": 0.0,
-  "null_frac_positive_p95": 0.576,
+  "null_frac_positive_p95": 0.586,
   "p_frac_positive": 0.0,
   "null_n_p_lt_005_p95": 9.0,
   "n_perm": 2000,
@@ -213,12 +213,12 @@
   }
  },
  "band_peak_sunny_shady_d": {
-  "median": 17.8
+  "median": 16.0
  },
  "_provenance": {
   "_version": "v10",
   "_git_sha": "5d35793",
-  "_analysis_git_sha": "9f21114",
-  "_written_at": "2026-10-22T06:44:18+00:00"
+  "_analysis_git_sha": "dcc094c",
+  "_written_at": "2026-10-22T19:52:00+00:00"
  }
 }

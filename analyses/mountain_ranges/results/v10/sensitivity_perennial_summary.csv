@@ -1,3 +1,3 @@
 regime,ranges,with_fit,median_snow_km2,median_onset_dowy,median_mad_d,median_lapse_rate,median_sunny_shady_d,pct_negative,sig_negative,sig_positive,median_slope,median_r,ranges_compared,median_onset_shift_vs_seasonal_d,perennial_share_of_snow_median,_version,_git_sha,_analysis_git_sha,_written_at
-seasonal,43,43,6.329e+04,193.6,13.32,3.434,8.058,93.02,24,1,-4.611,-0.6552,43,,,v10,5d35793,9f21114,2026-10-22T05:04:29+00:00
-perennial,43,43,3116,246.8,10.57,3.682,8.549,95.35,13,0,-2.753,-0.5193,43,51.51,0.04651,v10,5d35793,9f21114,2026-10-22T05:04:29+00:00
+seasonal,43,43,6.329e+04,193.6,13.32,3.434,11.16,93.02,24,1,-4.611,-0.6552,43,,,v10,5d35793,dcc094c,2026-10-22T19:55:48+00:00
+perennial,43,43,3116,246.8,10.57,3.682,12.58,95.35,13,0,-2.753,-0.5193,43,51.51,0.04651,v10,5d35793,dcc094c,2026-10-22T19:55:48+00:00

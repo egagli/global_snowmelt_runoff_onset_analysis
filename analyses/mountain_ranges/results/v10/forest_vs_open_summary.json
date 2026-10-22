@@ -15,10 +15,10 @@
  ],
  "lapse_rate_wilcoxon_p": 1.1249696824456753e-12,
  "sunny_shady_median_open_forest_d": [
-  7.9,
-  4.5
+  8.3,
+  4.6
  ],
- "sunny_shady_wilcoxon_p": 5.7190262595317184e-08,
+ "sunny_shady_wilcoxon_p": 6.966108328791054e-09,
  "n_ranges_interannual": 102,
  "anomaly_r_forest_open_median": 0.91,
  "temperature_slope_median_forest_open": [
@@ -46,7 +46,7 @@
  "_provenance": {
   "_version": "v10",
   "_git_sha": "5d35793",
-  "_analysis_git_sha": "b8c9797",
-  "_written_at": "2026-10-21T20:42:50+00:00"
+  "_analysis_git_sha": "dcc094c",
+  "_written_at": "2026-10-22T19:54:49+00:00"
  }
 }
