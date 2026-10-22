@@ -28,6 +28,11 @@ Design (partials schema 3, 2026-10-20; schema 1/2 history in docs/aggregation_li
   CHILI and its correlation with onset are still available per bin).
   The two former filter tags are views: ``fcf_lte_50`` = FCF classes 0-4,
   ``full_dataset`` = every class including "none" (:data:`FILTER_VIEWS`).
+- **Window-relative onset** (schema 4, 2026-10-22): every analysed FCF <= 50 % pixel with an aspect also carries
+  its onset minus the aspect-balanced mean of its (10 km UTM window, 100 m band) (:func:`window_relative`,
+  :data:`WINDOW_M`), summed like any other column (``n_wr``, ``s_wr``, ``ss_wr``; ``n_wr_<WY>``, ``s_wr_<WY>``).
+  Views expose it as ``runoff_onset_wrel`` (and ``_wy`` per year): aspect statistics that compare a slope with nearby
+  slopes at the same elevation, free of the location effects of unit-wide comparisons (:func:`aspect_contrast`).
 - **Histogram rows** (``onset_bin`` not null): for :data:`HIST_UNIT_TYPES`,
   per unit x elevation x perennial x 5-day onset bin, counts of the 11-yr
   median and of each year's onset over analysed pixels with FCF <= 50 %.
@@ -167,7 +172,23 @@ DEFAULT_GROUPS = ("mountain_ranges", "river_basins", "continents", "grdc_basins"
 # (``gsro_partials_schema``). The fleet re-maps a tile whose blob carries an older stamp (or none):
 # 1 = 2026-09-03 (three unit types), 2 = 2026-10-09 (+ grdc_basins), 3 = 2026-10-20 (terrain counts, FCF /
 # slope / perennial keys replace the filter tags and CHILI, latitude moments, water towers, onset histograms).
-PARTIALS_SCHEMA = 3
+PARTIALS_SCHEMA = 4
+
+# Window-relative onset (partials schema 4): each reference pixel's onset minus the aspect-balanced mean onset of its
+# (window, 100 m elevation band), so aspect statistics compare a slope with nearby slopes at the same elevation instead
+# of with the whole unit (range-wide comparisons mix location with aspect wherever timing and aspect make-up both vary
+# in space). Windows are WINDOW_M squares aligned to the tile's UTM coordinates (multiples of WINDOW_M in easting and
+# northing) and computed per tile, so a window cut by a tile edge is evaluated as two partial windows. Reference pixels:
+# analysed, forest cover <= 50 % (classes WINDOW_REF_FCF_CLASSES), aspect defined. A (window, band) qualifies when at
+# least WINDOW_MIN_BINS of the 24 aspect bins hold >= WINDOW_MIN_BIN_PX reference pixels and those bins hold
+# >= WINDOW_MIN_PX pixels; its reference value is the mean over those bins of their mean onset. Pixels in bins below
+# WINDOW_MIN_BIN_PX, in non-qualifying window-bands or outside the reference set get no value. The same per water year
+# (reference and qualification from that year's onsets).
+WINDOW_M = 10_000
+WINDOW_MIN_BIN_PX = 5
+WINDOW_MIN_BINS = 12
+WINDOW_MIN_PX = 300
+WINDOW_REF_FCF_CLASSES = tuple(range(5))
 
 KEY_COLS = ["unit_type", "unit_id", "elevation", "aspect", "latitude", "fcf_class", "slope_class", "perennial",
             "onset_bin"]
@@ -235,6 +256,36 @@ def _num(df, col):
     return v
 
 
+def window_relative(values, window_id, elev_idx, aspect_idx, reference):
+    """Window-relative onset (see :data:`WINDOW_M`): ``values`` minus the aspect-balanced mean of the reference pixels
+    of the same (window, elevation band), for reference pixels of qualifying window-bands; NaN elsewhere.
+    ``window_id`` and ``elev_idx`` are integer arrays, ``aspect_idx`` the 15 deg aspect bin (-1 = flat), ``reference``
+    a boolean mask. Vectorised over the tile (bincounts over factorized group codes)."""
+    v = np.asarray(values, dtype="float64")
+    out = np.full(len(v), np.nan)
+    ok = np.asarray(reference) & np.isfinite(v) & (np.asarray(aspect_idx) >= 0) & (np.asarray(elev_idx) >= 0)
+    if not ok.any():
+        return out
+    pos = np.flatnonzero(ok)
+    wb_codes, _ = pd.factorize(pd.MultiIndex.from_arrays([np.asarray(window_id)[pos], np.asarray(elev_idx)[pos]]), sort=False)
+    nb = len(ASPECT_EDGES) - 1
+    cell = wb_codes.astype("int64") * nb + np.asarray(aspect_idx)[pos].astype("int64")
+    ncell = (wb_codes.max() + 1) * nb
+    cnt = np.bincount(cell, minlength=ncell)
+    tot = np.bincount(cell, weights=v[pos], minlength=ncell)
+    counting = cnt >= WINDOW_MIN_BIN_PX
+    with np.errstate(invalid="ignore", divide="ignore"):
+        bin_mean = np.where(counting, tot / np.where(cnt > 0, cnt, 1), np.nan).reshape(-1, nb)
+    nbins = counting.reshape(-1, nb).sum(1)
+    npx = np.where(counting, cnt, 0).reshape(-1, nb).sum(1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ref = np.nansum(bin_mean, axis=1) / np.where(nbins > 0, nbins, np.nan)     # aspect-balanced mean
+    qualifies = (nbins >= WINDOW_MIN_BINS) & (npx >= WINDOW_MIN_PX)
+    keep = qualifies[wb_codes] & counting[cell]
+    out[pos[keep]] = v[pos[keep]] - ref[wb_codes[keep]]
+    return out
+
+
 def tile_partials(df, water_years, unit_types=None):
     """Partial sums for one tile's pixel table (``datacube.tabulate_tile``:
     every pixel with a DEM; ints with -9999 nodata, floats with NaN) for every
@@ -271,6 +322,15 @@ def tile_partials(df, water_years, unit_types=None):
     base["fcf_class"] = fcf_class_index(fcf)
     base["slope_class"] = slope_class_index(_num(df, "slope"))
     base["perennial"] = (df["esa_worldcover"].to_numpy() == PERENNIAL_WORLDCOVER_CLASS).astype(np.int8)
+    # window-relative onset (schema 4): WINDOW_M squares on the tile's UTM grid, per (window, elevation band)
+    wx = np.floor(df["x"].to_numpy("float64") / WINDOW_M).astype("int64")
+    wy = np.floor(df["y"].to_numpy("float64") / WINDOW_M).astype("int64")
+    window_id = wx * 1_000_000 + (wy + 500_000)
+    reference = analysed & np.isin(base["fcf_class"].to_numpy(), WINDOW_REF_FCF_CLASSES)
+    elev_idx, asp_idx = base["elevation"].to_numpy(), base["aspect"].to_numpy()
+    base["wrel"] = window_relative(med, window_id, elev_idx, asp_idx, reference)
+    for j, y in enumerate(water_years):
+        base[f"wr_{y}"] = window_relative(onset[:, j], window_id, elev_idx, asp_idx, reference)
     onset_bin_med = _bin_index(med, ONSET_BIN_EDGES)
     onset_bin_yr = {y: _bin_index(onset[:, j], ONSET_BIN_EDGES) for j, y in enumerate(water_years)}
 
@@ -383,6 +443,14 @@ def _partial_sums(base, pos, keys, water_years, analysed):
         out[f"n_{y}"] = bcount(on)
         out[f"s_{y}"] = bsum(on); out[f"ss_{y}"] = bsum(on ** 2)
         out[f"s_an_{y}"] = bsum(an); out[f"ss_an_{y}"] = bsum(an ** 2)
+    # window-relative onset (schema 4; see WINDOW_M): count, sum and sum of squares of the 11-yr median's, and count
+    # and sum per water year
+    if "wrel" in base:
+        wr = col("wrel")
+        out["n_wr"] = bcount(wr); out["s_wr"] = bsum(wr); out["ss_wr"] = bsum(wr ** 2)
+        for y in water_years:
+            wy_ = col(f"wr_{y}")
+            out[f"n_wr_{y}"] = bcount(wy_); out[f"s_wr_{y}"] = bsum(wy_)
     return out
 
 
@@ -670,6 +738,29 @@ def view(sparse, unit_type, bins, water_years, fcf=FILTER_VIEWS["fcf_lte_50"], s
     ds["runoff_onset_n"] = (dims_yearly, yr_n)
     ds["runoff_onset_anomaly"] = (dims_yearly, yr["an"])
     ds["runoff_onset_anomaly_std"] = (dims_yearly, yr["an_std"])
+    if "n_wr" in sums:                  # window-relative onset (schema 4)
+        nwr = sums["n_wr"].to_numpy()
+        mean, std = _mean_std(sums["s_wr"].to_numpy(), sums["ss_wr"].to_numpy(), np.where(nwr > 0, nwr, np.nan))
+        ds["runoff_onset_wrel"] = (dims_static, dense(mean))
+        ds["runoff_onset_wrel_std"] = (dims_static, dense(std))
+        ds["runoff_onset_wrel_n"] = (dims_static, dense(nwr, np.int32, 0))
+        wr = np.full(shape_static + (len(water_years),), np.nan, dtype=np.float32)
+        wr_n = np.zeros(shape_static + (len(water_years),), dtype=np.int32)
+        for j, y in enumerate(water_years):
+            if f"n_wr_{y}" not in sums:
+                continue
+            ny = sums[f"n_wr_{y}"].to_numpy()
+            with np.errstate(invalid="ignore", divide="ignore"):
+                wr[idx + (j,)] = sums[f"s_wr_{y}"].to_numpy() / np.where(ny > 0, ny, np.nan)
+            wr_n[idx + (j,)] = ny
+        ds["runoff_onset_wrel_wy"] = (dims_yearly, wr)
+        ds["runoff_onset_wrel_wy_n"] = (dims_yearly, wr_n)
+        for v in ("runoff_onset_wrel", "runoff_onset_wrel_std", "runoff_onset_wrel_wy"):
+            ds[v].attrs["units"] = "days"
+        ds["runoff_onset_wrel"].attrs["long_name"] = (
+            f"window-relative onset: onset minus the aspect-balanced mean of the same {WINDOW_M // 1000} km window and "
+            "100 m band (reference: analysed pixels, FCF <= 50 %, aspect defined; see aggregate.WINDOW_M)")
+        ds["runoff_onset_wrel_wy"].attrs["long_name"] = "window-relative onset of each water year"
     for x in ("chili", "fcf"):
         r = _pearson(sums[f"n_{x}"].to_numpy(), sums[f"s_{x}"].to_numpy(), sums[f"s_med_{x}"].to_numpy(),
                      sums[f"s_{x}_med"].to_numpy(), sums[f"ss_{x}"].to_numpy(), sums[f"ss_med_{x}"].to_numpy())
@@ -880,9 +971,32 @@ def threshold(ds, min_n, variables=None):
 
 
 def elevation_relative(da, dim="aspect"):
-    """Deviation from the per-elevation median across ``dim`` (the triplets'
-    third panel; was the stored ``runoff_onset_elev_relative``)."""
+    """Deviation from the per-elevation median across ``dim``, over the whole unit (the schema-3 triplets' third
+    panel; was the stored ``runoff_onset_elev_relative``). Range-wide: it mixes location with aspect where timing and
+    aspect make-up both vary in space; prefer the window-relative ``runoff_onset_wrel`` (schema 4)."""
     return da - da.median(dim)
+
+
+def aspect_contrast(da, n, dim="aspect"):
+    """Pixel-weighted cosine contrasts of an onset deviation over aspect bins (e.g. ``runoff_onset_wrel`` with its
+    ``_n``): fit d = a + p cos(aspect) + q sin(aspect) by weighted least squares along ``dim`` and return a Dataset
+    with ``ns`` = 2p (north-facing minus south-facing, days), ``ew`` = 2q (east-facing minus west-facing), ``amplitude``
+    = 2 sqrt(p^2 + q^2) and ``earliest_azimuth`` (degrees clockwise from north) for every other coordinate."""
+    ang = np.deg2rad(da[dim])
+    X = [xr.ones_like(ang), np.cos(ang), np.sin(ang)]
+    w = n.where(np.isfinite(da), 0).astype("float64")
+    y = da.fillna(0)
+    M = [[(w * X[i] * X[j]).sum(dim) for j in range(3)] for i in range(3)]
+    r = [(w * X[i] * y).sum(dim) for i in range(3)]
+    Ma = np.stack([np.stack([np.asarray(M[i][j]) for j in range(3)], -1) for i in range(3)], -2)
+    ra = np.stack([np.asarray(v) for v in r], -1)
+    ok = np.abs(np.linalg.det(Ma)) > 1e-9
+    b = np.full(ra.shape, np.nan)
+    b[ok] = np.linalg.solve(Ma[ok], ra[ok][..., None])[..., 0]
+    tmpl = r[0]
+    p = xr.DataArray(b[..., 1], dims=tmpl.dims, coords=tmpl.coords); q = xr.DataArray(b[..., 2], dims=tmpl.dims, coords=tmpl.coords)
+    return xr.Dataset({"ns": 2 * p, "ew": 2 * q, "amplitude": 2 * np.hypot(p, q),
+                       "earliest_azimuth": (np.degrees(np.arctan2(q, p)) + 180) % 360})
 
 
 # ---------------------------------------------------------------------------
