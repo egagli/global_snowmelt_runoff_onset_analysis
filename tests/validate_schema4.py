@@ -76,6 +76,26 @@ def test_synthetic(boundary_m=520_000, strict=True):
     return ns_pooled, ns_w
 
 
+def test_forest_groups():
+    """Half the pixels forested (FCF 80 %), melting 6 d earlier and mostly north-facing: each forest-cover group is
+    referenced to itself, so the open (FCF <= 50 %) and forested (> 50 %) views both recover the +10 d aspect effect,
+    and neither is biased by the other group's timing."""
+    df = synthetic_table(boundary_m=520_000)
+    rng = np.random.default_rng(3)
+    forest = rng.random(len(df)) < np.where(np.cos(np.deg2rad(df.aspect.to_numpy())) > 0, 0.7, 0.3)
+    df.loc[forest, "forest_cover_fraction"] = 80
+    for c in ["runoff_onset_median"] + [f"runoff_onset_WY{y}" for y in WY]:
+        df.loc[forest, c] = (df.loc[forest, c] - 6).astype("int16")
+    parts = aggregate.tile_partials(df, WY, unit_types=["mountain_ranges"])
+    sparse = aggregate.sparse_from_frame(parts, "mountain_ranges")
+    res = {}
+    for lab, fcf in (("open (FCF <= 50 %)", list(range(5))), ("forest (FCF > 50 %)", list(range(5, 10))), ("all", list(range(11)))):
+        ds = aggregate.view(sparse, "mountain_ranges", ("elevation", "aspect"), WY, fcf=fcf)
+        res[lab] = contrasts(ds, "runoff_onset_wrel", "runoff_onset_wrel_n")[0]
+    print("forest groups: window-relative N-S " + " | ".join(f"{k} {v:+.2f}" for k, v in res.items()) + " (true +10.0)")
+    assert all(abs(v - 10) < 0.8 for v in res.values()), res
+
+
 def load_module(path, name="aggregate_old"):
     spec = importlib.util.spec_from_file_location(name, path); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
     return mod
@@ -134,6 +154,7 @@ if __name__ == "__main__":
     args = ap.parse_args()
     test_synthetic(520_000, strict=True)
     test_synthetic(516_000, strict=False)
+    test_forest_groups()
     if args.tiles:
         res = real_tiles(args.tiles, args.old)
         if args.out: res.to_csv(args.out, index=False)

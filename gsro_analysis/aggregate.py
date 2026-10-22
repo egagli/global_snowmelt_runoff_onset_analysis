@@ -28,8 +28,9 @@ Design (partials schema 3, 2026-10-20; schema 1/2 history in docs/aggregation_li
   CHILI and its correlation with onset are still available per bin).
   The two former filter tags are views: ``fcf_lte_50`` = FCF classes 0-4,
   ``full_dataset`` = every class including "none" (:data:`FILTER_VIEWS`).
-- **Window-relative onset** (schema 4, 2026-10-22): every analysed FCF <= 50 % pixel with an aspect also carries
-  its onset minus the aspect-balanced mean of its (10 km UTM window, 100 m band) (:func:`window_relative`,
+- **Window-relative onset** (schema 4, 2026-10-22): every analysed pixel with an aspect and an FCF value also carries
+  its onset minus the aspect-balanced mean of its (10 km UTM window, 100 m band) among pixels of its own forest-cover
+  group (FCF <= 50 % or > 50 %, :data:`WINDOW_REF_GROUPS`) (:func:`window_relative`,
   :data:`WINDOW_M`), summed like any other column (``n_wr``, ``s_wr``, ``ss_wr``; ``n_wr_<WY>``, ``s_wr_<WY>``).
   Views expose it as ``runoff_onset_wrel`` (and ``_wy`` per year): aspect statistics that compare a slope with nearby
   slopes at the same elevation, free of the location effects of unit-wide comparisons (:func:`aspect_contrast`).
@@ -179,7 +180,9 @@ PARTIALS_SCHEMA = 4
 # of with the whole unit (range-wide comparisons mix location with aspect wherever timing and aspect make-up both vary
 # in space). Windows are WINDOW_M squares aligned to the tile's UTM coordinates (multiples of WINDOW_M in easting and
 # northing) and computed per tile, so a window cut by a tile edge is evaluated as two partial windows. Reference pixels:
-# analysed, forest cover <= 50 % (classes WINDOW_REF_FCF_CLASSES), aspect defined. A (window, band) qualifies when at
+# analysed, aspect defined, in one of the forest-cover groups WINDOW_REF_GROUPS; each group is referenced to itself
+# (open slopes against nearby open slopes, forested against forested), so the FCF <= 50 % views and the forest views
+# both have a window-relative onset; pixels without an FCF value get none. A (window, band) qualifies when at
 # least WINDOW_MIN_BINS of the 24 aspect bins hold >= WINDOW_MIN_BIN_PX reference pixels and those bins hold
 # >= WINDOW_MIN_PX pixels; its reference value is the mean over those bins of their mean onset. Pixels in bins below
 # WINDOW_MIN_BIN_PX, in non-qualifying window-bands or outside the reference set get no value. The same per water year
@@ -188,7 +191,7 @@ WINDOW_M = 10_000
 WINDOW_MIN_BIN_PX = 5
 WINDOW_MIN_BINS = 12
 WINDOW_MIN_PX = 300
-WINDOW_REF_FCF_CLASSES = tuple(range(5))
+WINDOW_REF_GROUPS = (tuple(range(5)), tuple(range(5, 10)))   # FCF <= 50 % | FCF > 50 % (FCF_CLASSES codes)
 
 KEY_COLS = ["unit_type", "unit_id", "elevation", "aspect", "latitude", "fcf_class", "slope_class", "perennial",
             "onset_bin"]
@@ -326,11 +329,18 @@ def tile_partials(df, water_years, unit_types=None):
     wx = np.floor(df["x"].to_numpy("float64") / WINDOW_M).astype("int64")
     wy = np.floor(df["y"].to_numpy("float64") / WINDOW_M).astype("int64")
     window_id = wx * 1_000_000 + (wy + 500_000)
-    reference = analysed & np.isin(base["fcf_class"].to_numpy(), WINDOW_REF_FCF_CLASSES)
-    elev_idx, asp_idx = base["elevation"].to_numpy(), base["aspect"].to_numpy()
-    base["wrel"] = window_relative(med, window_id, elev_idx, asp_idx, reference)
+    elev_idx, asp_idx, fcfc = base["elevation"].to_numpy(), base["aspect"].to_numpy(), base["fcf_class"].to_numpy()
+    groups = [analysed & np.isin(fcfc, g) for g in WINDOW_REF_GROUPS]
+
+    def wrel_all(values):           # each forest-cover group referenced to itself; the groups do not overlap
+        out = np.full(len(values), np.nan)
+        for ref in groups:
+            r = window_relative(values, window_id, elev_idx, asp_idx, ref)
+            out[ref] = r[ref]
+        return out
+    base["wrel"] = wrel_all(med)
     for j, y in enumerate(water_years):
-        base[f"wr_{y}"] = window_relative(onset[:, j], window_id, elev_idx, asp_idx, reference)
+        base[f"wr_{y}"] = wrel_all(onset[:, j])
     onset_bin_med = _bin_index(med, ONSET_BIN_EDGES)
     onset_bin_yr = {y: _bin_index(onset[:, j], ONSET_BIN_EDGES) for j, y in enumerate(water_years)}
 
@@ -759,7 +769,7 @@ def view(sparse, unit_type, bins, water_years, fcf=FILTER_VIEWS["fcf_lte_50"], s
             ds[v].attrs["units"] = "days"
         ds["runoff_onset_wrel"].attrs["long_name"] = (
             f"window-relative onset: onset minus the aspect-balanced mean of the same {WINDOW_M // 1000} km window and "
-            "100 m band (reference: analysed pixels, FCF <= 50 %, aspect defined; see aggregate.WINDOW_M)")
+            "100 m band, within the pixel's forest-cover group (FCF <= 50 % or > 50 %; see aggregate.WINDOW_M)")
         ds["runoff_onset_wrel_wy"].attrs["long_name"] = "window-relative onset of each water year"
     for x in ("chili", "fcf"):
         r = _pearson(sums[f"n_{x}"].to_numpy(), sums[f"s_{x}"].to_numpy(), sums[f"s_med_{x}"].to_numpy(),
