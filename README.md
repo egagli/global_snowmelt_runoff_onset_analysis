@@ -180,7 +180,7 @@ every input from source to analysis: [docs/aggregation_lineage.md](docs/aggregat
 | Fleet work list | **local, tracked** `pipeline/tile_data/ancillary_tiles_v10.txt` | `pipeline/pipeline.ipynb` from the store's commit history | SAS token |
 | Label layout of the two world maps | **local, tracked** `analyses/mountain_ranges/label_layout.csv` | curated by hand (the one input that is neither data nor code) | — |
 
-### The aggregate schema (partials schema 3, 2026-10-20)
+### The aggregate schema (partials schema 4, 2026-10-22)
 
 The fleet writes per-tile **partial sums** keyed by unit × geometric bins × three class keys; the aggregation
 notebooks sum them over tiles with DuckDB into one **sparse table** per unit type (`sparse_<unit>.parquet`,
@@ -215,7 +215,11 @@ The two former filter tags are selections on `fcf_class` (`aggregate.FILTER_VIEW
 `full_dataset` = all. CHILI is no longer a key (it was until schema 2); its mean (`chili_mean`) and correlation
 (`chili_corr`) remain. Variables: `runoff_onset_median`, `runoff_onset_mad`, `temporal_resolution_median` (static),
 `runoff_onset`, `runoff_onset_anomaly` (per water year), each as the cell **mean** with `<var>_std` and `<var>_n`;
-`n_years`, `terrain_n`, `latitude_mean`, `chili_mean`, `chili_corr`, `fcf_corr`. Marginals are
+`n_years`, `terrain_n`, `latitude_mean`, `chili_mean`, `chili_corr`, `fcf_corr`; since schema 4 also
+`runoff_onset_wrel` (and per water year `runoff_onset_wrel_wy`): the **window-relative onset**, each pixel's onset
+minus the aspect-balanced mean of its own 10 km window and 100 m band (open and forested pixels referenced
+separately), which the aspect analyses use instead of the range-wide band median because it does not mix where the
+slopes are with which way they face (`docs/aggregation_lineage.md`). Marginals are
 `aggregate.weighted_mean(ds, var, dims)`; `aggregate.threshold` masks thin cells. The analyses' masking rules are
 written out in the notebooks themselves.
 

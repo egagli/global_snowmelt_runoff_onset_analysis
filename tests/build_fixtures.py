@@ -1,4 +1,4 @@
-"""Write the CI fixture partials (schema 3) for a few tiles, read-only: the ancillary window from the live store,
+"""Write the CI fixture partials (the current PARTIALS_SCHEMA) for a few tiles, read-only: the ancillary window from the live store,
 with any unit-id layer the store does not hold yet (WTU_SIGNED before its fleet wave) rasterized in memory exactly
 as the ancillary job would; the store window; then tabulate_tile -> tile_partials -> tests/fixtures/partials/<version>/.
 

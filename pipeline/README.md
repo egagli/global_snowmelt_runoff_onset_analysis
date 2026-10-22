@@ -85,6 +85,14 @@ free `groupby` at reduce time while a finer one is a fleet re-map:
   `tests/validate_schema3.py` checks, on real tiles, that every default cube equals the schema-2 cube with its
   CHILI axis collapsed (counts exactly, means to float32), that DuckDB equals the in-memory reduce, and that the
   histograms and terrain counts add up.
+- **Window-relative onset (schema 4, 2026-10-22)**: the map also computes, per analysed pixel, the onset minus the
+  aspect-balanced mean of its 10 km window (UTM-aligned, within the tile) and 100 m band, for the median and every
+  water year, referenced separately for open (FCF classes 0–4) and forested (5–9) pixels (`aggregate.window_relative`),
+  and sums it as `n_wr`, `s_wr`, `ss_wr`, `n_wr_<year>`, `s_wr_<year>` (+25 columns, no new rows; parquet +24–35 %,
+  map time +20–50 %). `tests/validate_schema4.py` checks that the schema-3 columns are unchanged and that a synthetic
+  aspect contrast is recovered where the range-wide method is fooled by location. A schema-4 re-map is a plain
+  re-dispatch of **Process tiles to parquets**: the plan job lists every tile with an older stamp, and the reduce
+  refuses older partials.
 
 Changing a unit definition after the ancillary exists is `datacube.refresh_unit_layers(config, row,
 col, layers=...)` (re-rasterizes the given id layers of a stored tile into the ancillary store, one commit, no

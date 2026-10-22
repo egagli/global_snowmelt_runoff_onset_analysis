@@ -1,8 +1,8 @@
 # tests
 
-`fixtures/partials/v10/` holds the partial-sum parquets (partials schema 3) of two v10 tiles: 033_198 (Qin Ling: Huai He,
+`fixtures/partials/v10/` holds the partial-sum parquets (partials schema 4) of two v10 tiles: 033_198 (Qin Ling: Huai He,
 Yellow River, a mountain range, two water-tower parts) and 053_070 (Colombian Andes: Magdalena, San Juan), all five unit
-types, built by `tests/build_fixtures.py` on 2026-10-20 (read-only: the ancillary and store windows, with the
+types, built by `tests/build_fixtures.py` on 2026-10-22 (read-only: the ancillary and store windows, with the
 `WTU_SIGNED` layer rasterized in memory before its fleet wave). They are the input of the smoke test in
 `.github/workflows/ci.yml`: install the `ci` environment, import the package, and execute the three aggregation
 notebooks headlessly on them without any credential (the partials download and the ERA5-Land step skip themselves when
@@ -25,3 +25,9 @@ without `config/sas_token.txt` first on `PYTHONPATH`.
 
 `validate_schema3.py <old aggregate.py> <pixel tables...>` checks the schema-3 map and reduce against the schema-2 code
 on real pixel tables (see `docs/aggregation_lineage.md`).
+
+`validate_schema4.py [--old OLD_AGGREGATE_PY] [--out CSV] [ROW_COL ...]` checks the window-relative onset: a synthetic
+tile whose aspect contrast the range-wide method misreads (recovered with the window reference, per forest group, and
+through `range_metrics`), and, given the schema-3 `aggregate.py` and tiles, that the new map leaves every schema-3
+column bit-identical and how the per-range N–S contrast compares between the two methods. The two CI fixture tiles hold
+little snow, so few of their windows qualify; the window path is exercised on real tiles by this script.

@@ -443,3 +443,47 @@ pixels in its selection, which reproduces the schema-2 axes exactly (180 ranges 
 **What changes for the analyses.** The metrics tables' 100-pixel bin rule now acts on (range, elevation, aspect)
 bins instead of (range, elevation, aspect, CHILI) bins, so more bins pass and the metrics shift slightly; every
 headline number is recomputed after the re-map. Continents' "sunny–shaded" panels use the facing definition above.
+
+## Partials schema 4 (2026-10-22): window-relative onset
+
+**What changed.** The map adds one per-pixel quantity before summing: the **window-relative onset**, each analysed
+pixel's onset minus the aspect-balanced mean onset of its own 10 km window and 100 m band (`aggregate.window_relative`).
+Windows are 10 km squares aligned to the tile's UTM grid (`aggregate.WINDOW_M`); the reference is the mean over aspect
+bins of the bin mean onsets, so a window with more north-facing slopes does not drag its own reference late. A
+(window, band) cell qualifies with at least 12 of the 24 aspect bins holding at least 5 pixels each and at least 300
+pixels (`WINDOW_MIN_BINS`, `WINDOW_MIN_BIN_PX`, `WINDOW_MIN_PX`); only pixels in a counting aspect bin of a
+qualifying cell get a value (flat pixels never do). The reference is built separately for the open (FCF ≤ 50 %,
+classes 0–4) and forested (classes 5–9) pixels (`WINDOW_REF_GROUPS`), so a forested slope is compared with forested
+slopes; pixels without an FCF value get none. It is computed for the 11-year median onset and for each water year.
+New columns: `n_wr`, `s_wr`, `ss_wr`, `n_wr_<year>`, `s_wr_<year>` (25 for v10), no new rows; `view` turns them into
+`runoff_onset_wrel` (`_std`, `_n`) and `runoff_onset_wrel_wy` (`_wy_n`), and `add_facing` carries
+`sunny_runoff_onset_wrel` / `shaded_runoff_onset_wrel` into the continents cube.
+
+**Why.** Elevation-normalized timing used to be the bin's onset minus the band's median across aspects over the
+whole range (`aggregate.elevation_relative`). Where onset and the aspect make-up of the slopes both vary across a
+range, that difference mixes where the slopes are with which way they face: in a range whose north-facing slopes lie
+mostly in an early-melting part, north-facing bins look early. Measured on v10 with an independent pixel pass
+(0.1° windows): the location part is ~4 % of the range-wide signal in the Hindu Kush, a quarter to two fifths in
+Bayan Har, Qionglai Shan and Hengduan Shan, and more than all of it in the Transhimalaya and the eastern Himalaya.
+Comparing each pixel only with the other slopes of its own window and band removes location while keeping
+elevation removed; nothing reducible across tiles can do that, because the reference is a ratio of sums over a
+window, hence a per-pixel value computed in the map.
+
+**Limits.** The window reference is a step function: where onset changes sharply inside a window, the pixels of each
+side are compared with a reference that mixes both (synthetic test: a 30-day step through the middle of a window
+leaves +3.5 d of a true +10 d contrast; a step on a window edge leaves none). Windows do not cross tile edges, so a
+window cut by a tile edge is two smaller windows, each of which must qualify on its own.
+
+**Cost** (seven real v10 tiles): schema-3 columns bit-identical; +25 columns, parquet +24–35 %; map time +20–50 %;
+85–96 % of the analysed pixels of the snow-rich tiles get a value. **Validation** (`tests/validate_schema4.py`):
+the schema-3 columns of the new map equal the schema-3 code's map exactly; a synthetic tile with a +10 d north-facing
+delay and a location gradient that the range-wide method turns into −10.4 d is recovered as +9.95 d; the
+per-forest-group references recover it in both groups; on real tiles the window-relative N–S contrast matches the
+independent 0.1° pixel pass within ~0.5 d (western Himalaya 20.2 vs 19.8 d, eastern 3.5 vs 3.2 d).
+
+**What changes for the analyses.** `range_metrics.aspect_method` picks `"window"` whenever a cube carries
+`runoff_onset_wrel` (else `"pooled"`, the schema-3 method): the sunny–shady difference and its per-year values,
+the band aspect amplitudes, the triplets' third panel (`range_metrics.elevation_normalized_timing`) and the
+continents' sunny–shaded difference (`aggregate.sunny_shaded_difference`; the ratio stays on the median onset).
+`mountain_range_statistics.csv` keeps the range-wide fit alongside (`sunny_shady_pooled_d`,
+`earliest_aspect_pooled_deg`) and `pooling_share`. Every aspect number is recomputed after the re-map.
