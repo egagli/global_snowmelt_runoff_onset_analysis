@@ -61,9 +61,11 @@ sweeps (skip-if-complete, `REBUILD_SWEEP`). `pixi run aggregate` runs the three 
   helpers (`aggregate.weighted_mean` / `collapse` / `threshold`), the per-range statistics of `range_statistics`
   (`range_metrics`: one function per metric, so every table and figure computes them the same way), the polar-panel
   styling (`plotting`), the annotated colorbars and the two world-map renderers.
-- The mountain-range notebooks share one "analyses' view" block: CHILI classes folded, bins with ≤ 100 pixels masked, a
-  bin-year needs > 30 % of the bin's median pixels, the tropical-Andes rule, and a range-year mean anomaly needs ≥ 10 %
-  of the range's median pixels (the same rule as the metrics table, so the insets, the choropleths and the tables agree).
+- The mountain-range notebooks share one "analyses' view" block, the metrics table's rules (`gsro_analysis.range_metrics`):
+  bins need at least 100 pixels, a range-year mean anomaly needs at least 10 % of the range's median pixels, and every
+  range-year carries its coverage (flagged below 30 %, not dropped). So the insets, the choropleths and the tables agree.
+  (Until 2026-10-21 the notebooks also masked bin-years under 30 % of the bin's pixels and late tropical-Andes bins;
+  those rules are retired, and the tropical-Andes ranges fall below the inclusion rule anyway.)
 - Every quoted number exists in a `results/<version>/` table stamped with `_version`, `_git_sha` (production package),
   `_analysis_git_sha` (this repo) and `_written_at` (`gsro_analysis.results.provenance`).
 - Figures are PNG at ≤ 300 dpi, saved with an explicit `savefig` path; no `plt.show()`. Regressions on the eleven

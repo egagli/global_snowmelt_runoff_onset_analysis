@@ -193,6 +193,25 @@ def lapse_fit(onset, n, elevation, min_bins=5, min_span_m=500):
     return b[1] * 100
 
 
+def lapse_rate_weighted_bins(view_ds, min_pixels=MIN_PIXELS_PER_BIN):
+    """Per range, the metrics table's lapse rate: sqrt(count)-weighted regression of the bin median onset on elevation
+    over every (elevation, aspect) bin with more than ``min_pixels`` pixels (days per 100 m; NaN with fewer than 2
+    bins or a span under 100 m)."""
+    out = {}
+    elevation_axis = view_ds["elevation"].values
+    for name in view_ds["mountain_range"].values:
+        r = view_ds.sel(mountain_range=name)
+        onset = r["runoff_onset_median"].values
+        counts = r["runoff_onset_median_n"].values.astype(float)
+        elevation = np.broadcast_to(elevation_axis[:, None], onset.shape)
+        ok = np.isfinite(onset) & (counts > min_pixels)
+        slope = np.nan
+        if ok.sum() >= 2 and np.ptp(elevation[ok]) >= 100:
+            slope = np.polyfit(elevation[ok], onset[ok], 1, w=np.sqrt(counts[ok]))[0] * 100
+        out[str(name)] = slope
+    return pd.Series(out, name="lapse_rate_weighted_bins_per_100m").rename_axis("name")
+
+
 def yearly_topography(view_ds):
     """Range x water year lapse rate (d/100 m) and sunny-shady difference (2A, days), from :func:`yearly_view`."""
     elevation = view_ds["elevation"].values
@@ -316,20 +335,47 @@ EE_RAM = 0.34
 EE_TM = 0.18
 
 
-def evan_eisenman_expected(lat, lon, clim_ds):
-    """Evan & Eisenman (2021) eq. 2 at each range centroid from the ERA5 T0 / T1 climatology (the annual-mean
-    temperature and the amplitude of the annual cycle): ``ee_T0``, ``ee_T1``, ``ee_defined`` (the cycle crosses the
-    melt threshold) and ``ee_expected_sensitivity`` (days per °C)."""
-    lon_axis = clim_ds["longitude"].values
-    rows = []
-    for la, lo in zip(lat, lon):
-        x = lo % 360 if lon_axis.max() > 180 else lo
-        c = clim_ds.sel(latitude=la, longitude=x, method="nearest")
-        T0, T1 = float(c["T0"]), float(c["T1"])
-        graze = T1 ** 2 - (T0 - EE_TM) ** 2
-        rows.append({"ee_T0": T0, "ee_T1": T1, "ee_defined": graze > 0,
-                     "ee_expected_sensitivity": -(1 / EE_OMEGA) * (1 + EE_RAM) / np.sqrt(graze) if graze > 0 else np.nan})
-    return pd.DataFrame(rows, index=lat.index)
+def evan_eisenman_fields(clim_ds, tm=EE_TM, ram=EE_RAM):
+    """The two expectations of the Evan & Eisenman (2021) idealized model on the T0 / T1 climatology grid (days per °C,
+    NaN where the annual cycle never crosses ``tm``). The model: T(t) = T0 - T1 sin(wt - phi); snow accumulates at
+    Ra while T < Tm (until precipitation stops) and melts at Rm while T > Tm.
+
+    - ``disappearance``: their eq. 2, d(zeta)/dT0 = -(1/w)(1 + Ra/Rm) / sqrt(T1^2 - (T0 - Tm)^2), the snow-disappearance
+      date; the factor (1 + Ra/Rm) is the shorter accumulation season (less snow to melt).
+    - ``melt_onset``: the start of melt, the upward crossing of Tm, t = (pi + phi - arcsin((T0 - Tm)/T1)) / w, so
+      d(t)/dT0 = -(1/w) / sqrt(T1^2 - (T0 - Tm)^2): eq. 2 without the accumulation factor, independent of Ra/Rm. This is
+      the like-for-like expectation for runoff onset. (Both forms verified by simulating the model and differencing.)"""
+    graze = clim_ds["T1"] ** 2 - (clim_ds["T0"] - tm) ** 2
+    onset = (-(1 / EE_OMEGA) / np.sqrt(graze.where(graze > 0)))
+    return onset * (1 + ram), onset
+
+
+def evan_eisenman_expected(geometries, clim_ds, min_cells=3, tm=EE_TM, ram=EE_RAM):
+    """Per range (``geometries``: a GeoSeries in EPSG:4326 indexed by range name), the median over the climatology cells
+    the range polygon touches of both Evan & Eisenman (2021) expectations (:func:`evan_eisenman_fields`): ``ee_n_cells``
+    (cells where the cycle crosses the threshold), ``ee_defined`` (at least ``min_cells``), ``ee_expected_sensitivity``
+    (eq. 2, snow disappearance) and ``ee_expected_onset_sensitivity`` (melt onset), days per °C. The median, not the
+    mean, so cells near the eq.'s singularity (T1 ~ |T0 - Tm|) do not dominate."""
+    import rasterio.features
+    import rasterio.transform
+    disappearance, onset = evan_eisenman_fields(clim_ds, tm, ram)
+    lat, lon = clim_ds["latitude"].values, clim_ds["longitude"].values
+    if lon.max() > 180:
+        raise ValueError("expected longitudes in -180..180")
+    flip = lat[0] < lat[-1]                                    # rasterize needs north-up rows
+    on = onset.values[::-1] if flip else onset.values
+    dlon, dlat = abs(lon[1] - lon[0]), abs(lat[1] - lat[0])
+    transform = rasterio.transform.from_origin(lon.min() - dlon / 2, lat.max() + dlat / 2, dlon, dlat)
+    rows = {}
+    for name, geom in geometries.items():
+        mask = rasterio.features.rasterize([(geom, 1)], out_shape=on.shape, transform=transform, all_touched=True).astype(bool)
+        v = on[mask]
+        v = v[np.isfinite(v)]
+        ok = len(v) >= min_cells
+        med = float(np.median(v)) if ok else np.nan
+        rows[name] = {"ee_n_cells": int(len(v)), "ee_defined": ok,
+                      "ee_expected_sensitivity": med * (1 + ram), "ee_expected_onset_sensitivity": med}
+    return pd.DataFrame.from_dict(rows, orient="index").rename_axis("name")
 
 
 # ---------------------------------------------------------------------------------------------------------------

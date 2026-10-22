@@ -42,10 +42,10 @@ spearman_rho,,Spearman rank correlation
 spearman_p,,two-sided p of rho
 permutation_p,,share of 10000 permutations of the years with |r| >= the observed |r|
 sensitivity_n,,paired years in the temperature-sensitivity fit
-ee_T0,°C,"Evan & Eisenman (2021) annual-mean temperature at the centroid (ERA5, 0.7°)"
-ee_T1,°C,amplitude of the annual temperature cycle at the centroid
-ee_defined,,the annual cycle reaches the melt threshold
-ee_expected_sensitivity,days per °C,Evan & Eisenman (2021) eq. 2 expected sensitivity
+ee_n_cells,,ERA5 0.7° cells touched by the range polygon where the annual cycle crosses the melt threshold
+ee_defined,,at least 3 such cells
+ee_expected_sensitivity,days per °C,"Evan & Eisenman (2021) eq. 2 (snow-disappearance date), median over the cells"
+ee_expected_onset_sensitivity,days per °C,"the same model, melt-onset date (eq. 2 without the accumulation factor 1 + Ra/Rm), median over the cells"
 runoff_onset_anomaly_WY2015,days,pixel-weighted mean onset anomaly of the water year (coverage >= 10 %)
 runoff_onset_anomaly_WY2016,days,pixel-weighted mean onset anomaly of the water year (coverage >= 10 %)
 runoff_onset_anomaly_WY2017,days,pixel-weighted mean onset anomaly of the water year (coverage >= 10 %)

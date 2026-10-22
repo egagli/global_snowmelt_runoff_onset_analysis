@@ -151,11 +151,66 @@
   "seed": 0
  },
  "evan_eisenman": {
-  "n": 83,
-  "spearman_rho": 0.53,
-  "median_expected": -7.0,
-  "median_observed": -5.2,
-  "frac_observed_weaker": 0.81
+  "melt_onset_form": {
+   "n": 98,
+   "spearman_rho": 0.5,
+   "pearson_r": 0.4,
+   "median_expected": -5.5,
+   "median_observed": -5.2,
+   "frac_observed_weaker": 0.67,
+   "by_abs_latitude_band": {
+    "0-35": {
+     "n": 14,
+     "observed": -5.3,
+     "expected": -5.8
+    },
+    "35-50": {
+     "n": 50,
+     "observed": -6.8,
+     "expected": -5.8
+    },
+    "50-60": {
+     "n": 13,
+     "observed": -6.3,
+     "expected": -4.3
+    },
+    "60-90": {
+     "n": 21,
+     "observed": -2.3,
+     "expected": -3.4
+    }
+   }
+  },
+  "eq2_disappearance": {
+   "n": 98,
+   "spearman_rho": 0.5,
+   "pearson_r": 0.4,
+   "median_expected": -7.3,
+   "median_observed": -5.2,
+   "frac_observed_weaker": 0.82,
+   "by_abs_latitude_band": {
+    "0-35": {
+     "n": 14,
+     "observed": -5.3,
+     "expected": -7.8
+    },
+    "35-50": {
+     "n": 50,
+     "observed": -6.8,
+     "expected": -7.8
+    },
+    "50-60": {
+     "n": 13,
+     "observed": -6.3,
+     "expected": -5.8
+    },
+    "60-90": {
+     "n": 21,
+     "observed": -2.3,
+     "expected": -4.6
+    }
+   }
+  }
  },
  "band_peak_sunny_shady_d": {
   "median": 17.8
@@ -163,7 +218,7 @@
  "_provenance": {
   "_version": "v10",
   "_git_sha": "5d35793",
-  "_analysis_git_sha": "b8c9797",
-  "_written_at": "2026-10-21T20:53:45+00:00"
+  "_analysis_git_sha": "9f21114",
+  "_written_at": "2026-10-22T06:44:18+00:00"
  }
 }

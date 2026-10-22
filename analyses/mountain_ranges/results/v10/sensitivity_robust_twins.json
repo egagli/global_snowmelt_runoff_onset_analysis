@@ -1,0 +1,47 @@
+{
+ "lapse_aspect_covariation_spearman": {
+  "ranges": 99,
+  "median_rho": 0.30000000000000004,
+  "share_positive": 0.797979797979798,
+  "null_share_positive_p95": 0.5757575757575758,
+  "n_perm": 500
+ },
+ "early_melt_theil_sen": {
+  "> 30 d before the equinox": {
+   "ranges": 30,
+   "median_d_per_10d_earlier": -0.15382967032967076,
+   "share_positive": 0.26666666666666666
+  },
+  "within 30 d of the equinox": {
+   "ranges": 110,
+   "median_d_per_10d_earlier": -0.08062709858064812,
+   "share_positive": 0.45454545454545453
+  },
+  "30-60 d after": {
+   "ranges": 93,
+   "median_d_per_10d_earlier": 0.9178571428571431,
+   "share_positive": 0.7849462365591398
+  },
+  "60-90 d after": {
+   "ranges": 41,
+   "median_d_per_10d_earlier": 1.0053333333333359,
+   "share_positive": 0.6829268292682927
+  },
+  "> 90 d after": {
+   "ranges": 23,
+   "median_d_per_10d_earlier": 1.0630769230769113,
+   "share_positive": 0.7391304347826086
+  }
+ },
+ "aspect_vs_slope_class_within_range": {
+  "ranges": 109,
+  "median_spearman_rho": 0.8999999999999998,
+  "share_positive": 0.944954128440367
+ },
+ "_provenance": {
+  "_version": "v10",
+  "_git_sha": "5d35793",
+  "_analysis_git_sha": "9f21114",
+  "_written_at": "2026-10-22T05:04:41+00:00"
+ }
+}
