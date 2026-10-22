@@ -1,0 +1,169 @@
+{
+ "dataset_version": "v10",
+ "inclusion_snow_pct": 2.0,
+ "n_ranges_with_metrics": 161,
+ "n_excluded": 30,
+ "n_ranges": 131,
+ "n_with_fit": 131,
+ "ols": {
+  "pct_negative": 88.5,
+  "sig_negative": 67,
+  "sig_positive": 1,
+  "median_slope": -4.8,
+  "slope_iqr": [
+   -7.22,
+   -2.46
+  ],
+  "median_r": -0.65,
+  "ci_below_zero": 67,
+  "permutation_sig_negative": 67
+ },
+ "theil_sen": {
+  "pct_negative": 84.0,
+  "ci_below_zero": 53,
+  "ci_above_zero": 0,
+  "median_slope": -4.97,
+  "median_spearman_rho": -0.6
+ },
+ "median_onset_dowy": 182.0,
+ "median_mad_days": 11.3,
+ "median_lapse_rate_per_100m": 3.54,
+ "lapse_rate_iqr": [
+  2.58,
+  4.76
+ ],
+ "median_sunny_shady_d": 7.8,
+ "median_anomaly_sd": 8.8,
+ "by_abs_latitude_band": {
+  "0-35": {
+   "n": 15,
+   "median_slope": -4.85,
+   "pct_sig": 53.33,
+   "median_lapse": 3.03,
+   "median_sunny_shady": 7.18,
+   "median_onset": 172.48
+  },
+  "35-50": {
+   "n": 62,
+   "median_slope": -6.8,
+   "pct_sig": 69.35,
+   "median_lapse": 3.82,
+   "median_sunny_shady": 6.42,
+   "median_onset": 161.2
+  },
+  "50-60": {
+   "n": 26,
+   "median_slope": -4.54,
+   "pct_sig": 38.46,
+   "median_lapse": 4.05,
+   "median_sunny_shady": 11.13,
+   "median_onset": 204.72
+  },
+  "60-90": {
+   "n": 28,
+   "median_slope": -2.4,
+   "pct_sig": 25.0,
+   "median_lapse": 3.34,
+   "median_sunny_shady": 12.83,
+   "median_onset": 213.61
+  }
+ },
+ "onset_p5_p95_dowy": [
+  137.46,
+  226.0
+ ],
+ "lapse_rate_p5_p95": [
+  0.23,
+  6.57
+ ],
+ "sunny_shady_p5_p95": [
+  1.81,
+  17.51
+ ],
+ "anomaly_sd_iqr": [
+  6.7,
+  11.7
+ ],
+ "median_anomaly_spread": 29.0,
+ "n_ranges_ge8_years": 108,
+ "earliest_year_counts": {
+  "2015": 31,
+  "2016": 8,
+  "2017": 3,
+  "2018": 8,
+  "2019": 5,
+  "2020": 6,
+  "2021": 14,
+  "2022": 11,
+  "2023": 6,
+  "2024": 13,
+  "2025": 3
+ },
+ "latest_year_counts": {
+  "2015": 6,
+  "2016": 7,
+  "2017": 17,
+  "2018": 5,
+  "2019": 15,
+  "2020": 8,
+  "2021": 13,
+  "2022": 12,
+  "2023": 14,
+  "2024": 6,
+  "2025": 5
+ },
+ "positive_significant": [
+  [
+   "Verkhoyansk Range",
+   3.12,
+   0.64
+  ]
+ ],
+ "interannual_topography": {
+  "n_ranges": 99,
+  "median_lapse_rate_sd": 0.99,
+  "median_sunny_shady_sd": 2.89,
+  "lapse_rate_cv_pct": 27,
+  "sunny_shady_cv_pct": 34
+ },
+ "field_significance": {
+  "obs_sig_neg": 67,
+  "null_sig_neg_p95": 10.0,
+  "null_sig_neg_max": 20,
+  "obs_median_slope": -4.802,
+  "null_median_slope_min": -2.254,
+  "obs_frac_neg": 0.885,
+  "null_frac_neg_max": 0.779,
+  "n_perm": 1000,
+  "seed": 0
+ },
+ "lapse_aspect_covariation": {
+  "n_ranges": 99,
+  "median_r": 0.272,
+  "frac_positive": 0.758,
+  "n_p_lt_005": 18,
+  "null_median_r_p95": 0.069,
+  "p_median_r": 0.0,
+  "null_frac_positive_p95": 0.576,
+  "p_frac_positive": 0.0,
+  "null_n_p_lt_005_p95": 9.0,
+  "n_perm": 2000,
+  "seed": 0
+ },
+ "evan_eisenman": {
+  "n": 83,
+  "spearman_rho": 0.53,
+  "median_expected": -7.0,
+  "median_observed": -5.2,
+  "frac_observed_weaker": 0.81
+ },
+ "band_peak_sunny_shady_d": {
+  "median": 17.8
+ },
+ "_provenance": {
+  "_version": "v10",
+  "_git_sha": "5d35793",
+  "_analysis_git_sha": "b8c9797",
+  "_written_at": "2026-10-21T20:53:45+00:00"
+ }
+}

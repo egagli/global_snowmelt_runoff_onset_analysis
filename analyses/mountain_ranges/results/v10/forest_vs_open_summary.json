@@ -1,0 +1,52 @@
+{
+ "n_ranges_compared": 122,
+ "median_forest_share": 0.374,
+ "onset_forest_minus_open_median_d": -6.4,
+ "onset_forest_minus_open_iqr_d": [
+  -14.3,
+  -0.2
+ ],
+ "onset_forest_minus_open_min_d": -47.5,
+ "share_forest_earlier": 0.75,
+ "mad_forest_minus_open_median_d": 1.0,
+ "lapse_rate_median_open_forest": [
+  3.52,
+  2.01
+ ],
+ "lapse_rate_wilcoxon_p": 1.1249696824456753e-12,
+ "sunny_shady_median_open_forest_d": [
+  7.9,
+  4.5
+ ],
+ "sunny_shady_wilcoxon_p": 5.7190262595317184e-08,
+ "n_ranges_interannual": 102,
+ "anomaly_r_forest_open_median": 0.91,
+ "temperature_slope_median_forest_open": [
+  -5.0,
+  -5.9
+ ],
+ "by_abs_latitude_band": {
+  "0-35": {
+   "size": 14,
+   "median": -3.6
+  },
+  "35-50": {
+   "size": 60,
+   "median": -1.4
+  },
+  "50-60": {
+   "size": 25,
+   "median": -13.2
+  },
+  "60-90": {
+   "size": 23,
+   "median": -21.9
+  }
+ },
+ "_provenance": {
+  "_version": "v10",
+  "_git_sha": "5d35793",
+  "_analysis_git_sha": "b8c9797",
+  "_written_at": "2026-10-21T20:42:50+00:00"
+ }
+}

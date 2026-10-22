@@ -1,0 +1,115 @@
+column,unit,description
+GMBA_V2_ID,,GMBA Inventory v2.0 standard-300 id
+continent,,USGS continent nearest to the range centroid (Australia folded into Oceania)
+centroid_latitude,degrees,latitude of the GMBA polygon centroid
+centroid_longitude,degrees,longitude of the GMBA polygon centroid
+mean_median_onset_dowy,day of water year,pixel-weighted mean of the 11-year median runoff onset (bins >= 100 px)
+mean_mad_days,days,pixel-weighted mean of the per-pixel median absolute deviation of onset
+lapse_rate_weighted_bins_per_100m,days per 100 m,"sqrt(count)-weighted regression of bin median onset on elevation over (elevation, aspect) bins"
+lapse_rate_weighted_bins_r2,,r² of that regression
+snowmelt_lapse_rate_per_100m,days per 100 m,regression of the aspect-collapsed elevation profile on elevation
+snowmelt_lapse_rate_corr,,Pearson r of that regression
+terrain_km2,km²,"land pixels with a DEM (not ESA WorldCover water), snow or not, any forest cover"
+snow_km2,km²,"mapped snow: pixels with an 11-year median onset, FCF <= 50 % (the analysis footprint; flat pixels included)"
+snow_under_forest_km2,km²,pixels with an 11-year median onset under forest (FCF > 50 %)
+snow_pct_of_terrain,%,snow_km2 / terrain_km2
+polygon_km2,km²,GMBA polygon area (EPSG:6933)
+snow_pct_of_polygon,%,snow_km2 / polygon_km2: the inclusion quantity
+included,,has metrics and snow_pct_of_polygon >= 2.0 %
+sunny_shady_d,days,2A of the cosine fit of elevation-removed onset against aspect (11-year median fields)
+earliest_aspect_deg,degrees from north,aspect of the earliest onset in that fit
+aspect_fit_r2,,r² of the cosine fit
+n_years,,water years with a range-year anomaly
+anomaly_sd,days,interannual s.d. of the range-year anomaly (>= 8 years)
+anomaly_spread,days,max - min range-year anomaly (>= 8 years)
+earliest_year,water year,year of the most negative anomaly (>= 8 years)
+latest_year,water year,year of the most positive anomaly (>= 8 years)
+topography_n_years,,years with both a per-year lapse rate and a per-year sunny-shady difference
+lapse_rate_sd,days per 100 m,interannual s.d. of the per-year lapse rate (>= 8 years)
+sunny_shady_sd,days,interannual s.d. of the per-year sunny-shady difference (>= 8 years)
+lapse_aspect_r,,Pearson r across years between the per-year lapse rate and sunny-shady difference
+lapse_aspect_p,,two-sided p of that r
+ols_slope,days per °C,OLS slope of the range-year anomaly on the spring 2 m temperature anomaly
+ols_se,days per °C,standard error of the OLS slope
+ols_ci_low,days per °C,lower t-based 95 % bound of the OLS slope
+ols_ci_high,days per °C,upper t-based 95 % bound of the OLS slope
+pearson_r,,Pearson r of the fit
+ols_p,,two-sided p of the OLS slope
+theil_sen_slope,days per °C,Theil-Sen slope (median of pairwise slopes)
+theil_sen_low,days per °C,lower 95 % bound of the Theil-Sen slope
+theil_sen_high,days per °C,upper 95 % bound of the Theil-Sen slope
+spearman_rho,,Spearman rank correlation
+spearman_p,,two-sided p of rho
+permutation_p,,share of 10000 permutations of the years with |r| >= the observed |r|
+sensitivity_n,,paired years in the temperature-sensitivity fit
+ee_T0,°C,"Evan & Eisenman (2021) annual-mean temperature at the centroid (ERA5, 0.7°)"
+ee_T1,°C,amplitude of the annual temperature cycle at the centroid
+ee_defined,,the annual cycle reaches the melt threshold
+ee_expected_sensitivity,days per °C,Evan & Eisenman (2021) eq. 2 expected sensitivity
+runoff_onset_anomaly_WY2015,days,pixel-weighted mean onset anomaly of the water year (coverage >= 10 %)
+runoff_onset_anomaly_WY2016,days,pixel-weighted mean onset anomaly of the water year (coverage >= 10 %)
+runoff_onset_anomaly_WY2017,days,pixel-weighted mean onset anomaly of the water year (coverage >= 10 %)
+runoff_onset_anomaly_WY2018,days,pixel-weighted mean onset anomaly of the water year (coverage >= 10 %)
+runoff_onset_anomaly_WY2019,days,pixel-weighted mean onset anomaly of the water year (coverage >= 10 %)
+runoff_onset_anomaly_WY2020,days,pixel-weighted mean onset anomaly of the water year (coverage >= 10 %)
+runoff_onset_anomaly_WY2021,days,pixel-weighted mean onset anomaly of the water year (coverage >= 10 %)
+runoff_onset_anomaly_WY2022,days,pixel-weighted mean onset anomaly of the water year (coverage >= 10 %)
+runoff_onset_anomaly_WY2023,days,pixel-weighted mean onset anomaly of the water year (coverage >= 10 %)
+runoff_onset_anomaly_WY2024,days,pixel-weighted mean onset anomaly of the water year (coverage >= 10 %)
+runoff_onset_anomaly_WY2025,days,pixel-weighted mean onset anomaly of the water year (coverage >= 10 %)
+coverage_WY2015,,share of the range's median-onset pixels with a valid onset that year
+coverage_WY2016,,share of the range's median-onset pixels with a valid onset that year
+coverage_WY2017,,share of the range's median-onset pixels with a valid onset that year
+coverage_WY2018,,share of the range's median-onset pixels with a valid onset that year
+coverage_WY2019,,share of the range's median-onset pixels with a valid onset that year
+coverage_WY2020,,share of the range's median-onset pixels with a valid onset that year
+coverage_WY2021,,share of the range's median-onset pixels with a valid onset that year
+coverage_WY2022,,share of the range's median-onset pixels with a valid onset that year
+coverage_WY2023,,share of the range's median-onset pixels with a valid onset that year
+coverage_WY2024,,share of the range's median-onset pixels with a valid onset that year
+coverage_WY2025,,share of the range's median-onset pixels with a valid onset that year
+low_coverage_WY2015,,the year has an anomaly but coverage < 30%
+low_coverage_WY2016,,the year has an anomaly but coverage < 30%
+low_coverage_WY2017,,the year has an anomaly but coverage < 30%
+low_coverage_WY2018,,the year has an anomaly but coverage < 30%
+low_coverage_WY2019,,the year has an anomaly but coverage < 30%
+low_coverage_WY2020,,the year has an anomaly but coverage < 30%
+low_coverage_WY2021,,the year has an anomaly but coverage < 30%
+low_coverage_WY2022,,the year has an anomaly but coverage < 30%
+low_coverage_WY2023,,the year has an anomaly but coverage < 30%
+low_coverage_WY2024,,the year has an anomaly but coverage < 30%
+low_coverage_WY2025,,the year has an anomaly but coverage < 30%
+spring_temperature_anomaly_WY2015,°C,mean spring 2 m temperature anomaly of the year (ERA5-Land zonal mean)
+spring_temperature_anomaly_WY2016,°C,mean spring 2 m temperature anomaly of the year (ERA5-Land zonal mean)
+spring_temperature_anomaly_WY2017,°C,mean spring 2 m temperature anomaly of the year (ERA5-Land zonal mean)
+spring_temperature_anomaly_WY2018,°C,mean spring 2 m temperature anomaly of the year (ERA5-Land zonal mean)
+spring_temperature_anomaly_WY2019,°C,mean spring 2 m temperature anomaly of the year (ERA5-Land zonal mean)
+spring_temperature_anomaly_WY2020,°C,mean spring 2 m temperature anomaly of the year (ERA5-Land zonal mean)
+spring_temperature_anomaly_WY2021,°C,mean spring 2 m temperature anomaly of the year (ERA5-Land zonal mean)
+spring_temperature_anomaly_WY2022,°C,mean spring 2 m temperature anomaly of the year (ERA5-Land zonal mean)
+spring_temperature_anomaly_WY2023,°C,mean spring 2 m temperature anomaly of the year (ERA5-Land zonal mean)
+spring_temperature_anomaly_WY2024,°C,mean spring 2 m temperature anomaly of the year (ERA5-Land zonal mean)
+spring_temperature_anomaly_WY2025,°C,mean spring 2 m temperature anomaly of the year (ERA5-Land zonal mean)
+sunny_shady_d_WY2015,days,sunny-shady difference (2A) of the year
+sunny_shady_d_WY2016,days,sunny-shady difference (2A) of the year
+sunny_shady_d_WY2017,days,sunny-shady difference (2A) of the year
+sunny_shady_d_WY2018,days,sunny-shady difference (2A) of the year
+sunny_shady_d_WY2019,days,sunny-shady difference (2A) of the year
+sunny_shady_d_WY2020,days,sunny-shady difference (2A) of the year
+sunny_shady_d_WY2021,days,sunny-shady difference (2A) of the year
+sunny_shady_d_WY2022,days,sunny-shady difference (2A) of the year
+sunny_shady_d_WY2023,days,sunny-shady difference (2A) of the year
+sunny_shady_d_WY2024,days,sunny-shady difference (2A) of the year
+sunny_shady_d_WY2025,days,sunny-shady difference (2A) of the year
+lapse_rate_per_100m_WY2015,days per 100 m,lapse rate of the year
+lapse_rate_per_100m_WY2016,days per 100 m,lapse rate of the year
+lapse_rate_per_100m_WY2017,days per 100 m,lapse rate of the year
+lapse_rate_per_100m_WY2018,days per 100 m,lapse rate of the year
+lapse_rate_per_100m_WY2019,days per 100 m,lapse rate of the year
+lapse_rate_per_100m_WY2020,days per 100 m,lapse rate of the year
+lapse_rate_per_100m_WY2021,days per 100 m,lapse rate of the year
+lapse_rate_per_100m_WY2022,days per 100 m,lapse rate of the year
+lapse_rate_per_100m_WY2023,days per 100 m,lapse rate of the year
+lapse_rate_per_100m_WY2024,days per 100 m,lapse rate of the year
+lapse_rate_per_100m_WY2025,days per 100 m,lapse rate of the year
+abs_latitude_band,degrees,reporting band of |centroid latitude|
