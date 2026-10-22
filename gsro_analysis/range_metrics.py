@@ -159,6 +159,41 @@ def aspect_method(view_ds, method=None):
     return method
 
 
+def elevation_normalized_timing(view_ds, method=None, min_aspects=None):
+    """The polar triplets' third panel, dims ``(mountain_range, elevation, aspect)``: how much earlier (< 0) or later
+    each aspect starts runoff than the other aspects at the same elevation.
+    - ``"window"`` (default when the cube has ``runoff_onset_wrel``): the window-relative onset, i.e. against the
+      other aspects of the same 10 km window and 100 m band, averaged over the range; bands with fewer than
+      ``min_aspects`` (default 20) of the 24 aspect bins are masked;
+    - ``"pooled"`` (schema 3): the band's onset minus its median over aspects across the whole range; bands with any
+      aspect bin missing are masked (``min_aspects`` default 24)."""
+    method = aspect_method(view_ds, method)
+    if method == "window":
+        field = view_ds["runoff_onset_wrel"]
+        k = 20 if min_aspects is None else min_aspects
+    else:
+        field = aggregate.elevation_relative(view_ds["runoff_onset_median"])
+        k = 24 if min_aspects is None else min_aspects
+    out = field.where(field.notnull().sum("aspect") >= k)
+    out.attrs = {"units": "days", "method": method,
+                 "long_name": "onset relative to the other aspects at the same elevation"
+                              + (" of the same 10 km window" if method == "window" else " across the whole range")}
+    return out
+
+
+def pooling_share(view_ds, min_aspects=20):
+    """Per range, the share of the range-wide elevation-normalized timing (schema-3 triplet panel) that is pooling:
+    the pixel-weighted mean square of (range-wide - window-relative) over the pixel-weighted mean square of the
+    range-wide field, over (elevation, aspect) cells where both exist. ~0 = the range-wide panel shows aspect; > 0.5 =
+    it mostly shows where in the range the slopes are. Needs a schema-4 cube."""
+    pooled = elevation_normalized_timing(view_ds, "pooled", min_aspects=min_aspects)
+    window = elevation_normalized_timing(view_ds, "window", min_aspects=min_aspects)
+    n = view_ds["runoff_onset_median_n"].where(pooled.notnull() & window.notnull())
+    num = (n * (pooled - window) ** 2).sum(BIN_DIMS)
+    den = (n * pooled ** 2).sum(BIN_DIMS)
+    return (num / den.where(den > 0)).to_pandas().set_axis(_names(view_ds)).rename("pooling_share")
+
+
 def cosine_fit(curve, aspect_deg, min_aspects=MIN_ASPECTS):
     """Fit ``curve = a + A cos(aspect - phi)``: returns (A [days], azimuth of the EARLIEST onset [deg], r²).
     The sunny-shady difference is 2A."""

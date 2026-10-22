@@ -119,6 +119,28 @@ def test_range_metrics():
     assert (bm.amp_d.mul(2).sub(10).abs() < 1.5).all()
 
 
+def test_helpers():
+    """The display and comparison helpers on the synthetic tile: the triplet panel (window and pooled), the pooling
+    share, and the sun-facing minus shade-facing difference of the continents panel."""
+    from gsro_analysis import range_metrics as rm
+    df = synthetic_table(boundary_m=520_000)
+    sparse = aggregate.sparse_from_frame(aggregate.tile_partials(df, WY, unit_types=["mountain_ranges"]), "mountain_ranges")
+    ds = aggregate.view(sparse, "mountain_ranges", ("elevation", "aspect"), WY).assign_coords(mountain_range=["synthetic"])
+    v = rm.base_view(ds)
+    # the synthetic tile has north- and south-facing pixels only (16 of 24 aspect bins): lower the band rule
+    w, p_ = rm.elevation_normalized_timing(v, min_aspects=12), rm.elevation_normalized_timing(v, "pooled", min_aspects=12)
+    share = float(rm.pooling_share(v, min_aspects=12).iloc[0])
+    e = aggregate.view(sparse, "mountain_ranges", ("elevation",), WY)
+    e = aggregate.add_facing(e, sparse, "mountain_ranges", ("elevation",), WY)
+    diff, n, method = aggregate.sunny_shaded_difference(e, 100)
+    d = float((diff * n).sum() / n.where(diff.notnull()).sum())
+    print(f"helpers: triplet panel {w.attrs['method']} N-facing {float(w.sel(aspect=7.5).mean()):+.1f} / S-facing {float(w.sel(aspect=187.5).mean()):+.1f} d "
+          f"(pooled {float(p_.sel(aspect=7.5).mean()):+.1f} / {float(p_.sel(aspect=187.5).mean()):+.1f}) | pooling share {share:.2f} | "
+          f"sunny - shaded ({method}) {d:+.2f} d")
+    assert w.attrs["method"] == "window" and share > 0.5
+    assert -10.5 < d < -7.5, d       # sun-facing (+-45 deg of south) minus shade-facing of a +-5 cos(aspect) effect
+
+
 def load_module(path, name="aggregate_old"):
     spec = importlib.util.spec_from_file_location(name, path); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
     return mod
@@ -179,6 +201,7 @@ if __name__ == "__main__":
     test_synthetic(516_000, strict=False)
     test_forest_groups()
     test_range_metrics()
+    test_helpers()
     if args.tiles:
         res = real_tiles(args.tiles, args.old)
         if args.out: res.to_csv(args.out, index=False)

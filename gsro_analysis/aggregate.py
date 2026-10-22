@@ -855,16 +855,31 @@ def facing_view(sparse, unit_type, bins, water_years, facing, half_width=45.0, m
 
 
 def add_facing(ds, sparse, unit_type, bins, water_years, half_width=45.0, min_slope_class=1, **kw):
-    """Add ``sunny_<var>`` / ``shaded_<var>`` (median onset, MAD, their counts) to a cube ``ds`` with the same
-    ``bins`` (e.g. the continents cube): the inputs of the sunny-shaded difference."""
+    """Add ``sunny_<var>`` / ``shaded_<var>`` (median onset, MAD, the window-relative onset when the partials carry it
+    (schema 4), their counts) to a cube ``ds`` with the same ``bins`` (e.g. the continents cube): the inputs of the
+    sunny-shaded difference. ``sunny_runoff_onset_wrel - shaded_runoff_onset_wrel`` compares each slope with the
+    slopes of its own window and band; the median-onset difference compares slopes anywhere in the bin."""
     for facing in FACING:
         f = facing_view(sparse, unit_type, bins, water_years, facing, half_width, min_slope_class, **kw)
         f = f.reindex_like(ds[[d for d in ds.dims if d in f.dims]])
-        for v in ("runoff_onset_median", "runoff_onset_median_n", "runoff_onset_mad", "runoff_onset_mad_n"):
+        wrel = ("runoff_onset_wrel", "runoff_onset_wrel_n") if "runoff_onset_wrel" in f else ()
+        for v in ("runoff_onset_median", "runoff_onset_median_n", "runoff_onset_mad", "runoff_onset_mad_n") + wrel:
             ds[f"{facing}_{v}"] = f[v].fillna(0).astype(f[v].dtype) if v.endswith("_n") else f[v]
     ds.attrs["facing_definition"] = (f"sunny = aspect within {half_width} deg of the equator direction, shaded = within "
                                      f"{half_width} deg of the pole direction, slopes >= {10 * min_slope_class} deg")
     return ds
+
+
+def sunny_shaded_difference(ds, min_n):
+    """Onset on sun-facing minus shade-facing slopes (:func:`add_facing` variables), each side masked below ``min_n``
+    pixels: ``(difference, count, method)``. Uses the window-relative onset when the cube carries it (each slope
+    against the slopes of its own window and band; schema 4) and the median onset otherwise (slopes anywhere in the
+    bin)."""
+    var = "runoff_onset_wrel" if "sunny_runoff_onset_wrel" in ds else "runoff_onset_median"
+    sunny = ds[f"sunny_{var}"].where(ds[f"sunny_{var}_n"] >= min_n)
+    shaded = ds[f"shaded_{var}"].where(ds[f"shaded_{var}_n"] >= min_n)
+    n = np.minimum(ds[f"sunny_{var}_n"], ds[f"shaded_{var}_n"])
+    return sunny - shaded, n, ("window" if var == "runoff_onset_wrel" else "pooled")
 
 
 def reduce_partials(partials, group, filter_tag, water_years):
