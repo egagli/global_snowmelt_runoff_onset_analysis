@@ -16,6 +16,12 @@ range name; nothing here reads files. The rules match the per-range metrics tabl
 
 Pixel counts are area: the fleet counts pixels of an 80 m UTM grid, so one pixel is :data:`PIXEL_AREA_KM2` at
 every latitude (never apply cos(latitude)).
+
+Aspect statistics (the sunny-shady difference, its per-year values and the per-band arch) use the WINDOW-RELATIVE
+onset (``runoff_onset_wrel``, partials schema 4: each slope against the other slopes of its own 10 km window and 100 m
+band) whenever the cube has it, and the schema-3 range-wide comparison (each band against the band's median over the
+whole range) otherwise or with ``method="pooled"``. The range-wide comparison mixes location with aspect where timing
+and aspect make-up both vary in space, so it is kept only as a comparison.
 """
 
 import numpy as np
@@ -124,13 +130,33 @@ def interannual_anomaly(anom_df, min_years=MIN_YEARS_INTERANNUAL):
 # aspect: the cosine "sunny-shady difference"
 
 def aspect_curve(onset, n, min_aspects=MIN_ASPECTS):
-    """Elevation-relative onset per aspect bin: each band's onset minus the band's median across aspects (bands with
-    at least ``min_aspects`` aspect bins), averaged over bands weighted by pixel count. Dims ``(..., elevation,
-    aspect)`` -> ``(..., aspect)``."""
+    """RANGE-WIDE elevation-relative onset per aspect bin (schema 3, ``method="pooled"``): each band's onset minus the
+    band's median across aspects over the whole range (bands with at least ``min_aspects`` aspect bins), averaged over
+    bands weighted by pixel count. Dims ``(..., elevation, aspect)`` -> ``(..., aspect)``."""
     ok = onset.notnull().sum("aspect") >= min_aspects
     rel = (onset - onset.median("aspect")).where(ok)
     w = n.where(rel.notnull())
     return (rel * w).sum("elevation") / w.sum("elevation").where(w.sum("elevation") > 0)
+
+
+def aspect_curve_window(wrel, n, min_aspects=MIN_ASPECTS):
+    """WINDOW-RELATIVE onset per aspect bin (schema 4): the cube's ``runoff_onset_wrel`` (already relative to the
+    slopes of the same window and band) averaged over bands weighted by its pixel count, using bands with at least
+    ``min_aspects`` aspect bins. Dims ``(..., elevation, aspect)`` -> ``(..., aspect)``."""
+    ok = wrel.notnull().sum("aspect") >= min_aspects
+    rel = wrel.where(ok)
+    w = n.where(rel.notnull())
+    return (rel * w).sum("elevation") / w.sum("elevation").where(w.sum("elevation") > 0)
+
+
+def aspect_method(view_ds, method=None):
+    """``"window"`` when the cube carries the window-relative onset (schema 4) and ``method`` is not given, else
+    ``method`` (``"window"`` or ``"pooled"``)."""
+    if method is None:
+        return "window" if "runoff_onset_wrel" in view_ds else "pooled"
+    if method == "window" and "runoff_onset_wrel" not in view_ds:
+        raise ValueError("the cube has no runoff_onset_wrel (partials schema < 4): use method='pooled'")
+    return method
 
 
 def cosine_fit(curve, aspect_deg, min_aspects=MIN_ASPECTS):
@@ -150,23 +176,34 @@ def cosine_fit(curve, aspect_deg, min_aspects=MIN_ASPECTS):
     return amp, (latest + 180) % 360, r2
 
 
-def yearly_view(view_ds, min_bin_year_fraction=MIN_BIN_YEAR_FRACTION):
-    """``runoff_onset`` and ``runoff_onset_n`` with bin-years of no more than ``min_bin_year_fraction`` of the
-    bin's median-onset pixels masked (for the per-year topographic fits)."""
-    enough = view_ds["runoff_onset_n"] > min_bin_year_fraction * view_ds["runoff_onset_median_n"]
-    return view_ds["runoff_onset"].where(enough), view_ds["runoff_onset_n"].where(enough)
+def yearly_view(view_ds, min_bin_year_fraction=MIN_BIN_YEAR_FRACTION, var="runoff_onset"):
+    """``var`` and its count per water year with bin-years of no more than ``min_bin_year_fraction`` of the bin's
+    median-onset pixels masked (for the per-year topographic fits). ``var="runoff_onset_wrel_wy"`` gives the
+    window-relative onset of each year (its count against the window-relative median count)."""
+    n_y = view_ds[f"{var}_n"]
+    ref = view_ds["runoff_onset_wrel_n"] if var == "runoff_onset_wrel_wy" else view_ds["runoff_onset_median_n"]
+    enough = n_y > min_bin_year_fraction * ref
+    return view_ds[var].where(enough), n_y.where(enough)
 
 
-def sunny_shady(view_ds):
+def sunny_shady(view_ds, method=None):
     """Per range: ``sunny_shady_d`` (2A of the climatological curve, days), ``earliest_aspect_deg``, ``aspect_fit_r2``.
-    Range x water year: the same 2A per year, and the year's earliest-onset aspect (two DataFrames)."""
+    Range x water year: the same 2A per year, and the year's earliest-onset aspect (two DataFrames). ``method``:
+    ``"window"`` (window-relative onset, the default when the cube has it) or ``"pooled"`` (range-wide, schema 3)."""
+    method = aspect_method(view_ds, method)
     aspect = view_ds["aspect"].values
-    med = aspect_curve(view_ds["runoff_onset_median"], view_ds["runoff_onset_median_n"])
+    if method == "window":
+        med = aspect_curve_window(view_ds["runoff_onset_wrel"], view_ds["runoff_onset_wrel_n"])
+        onset_y, n_y = yearly_view(view_ds, var="runoff_onset_wrel_wy")
+        curve_y = aspect_curve_window
+    else:
+        med = aspect_curve(view_ds["runoff_onset_median"], view_ds["runoff_onset_median_n"])
+        onset_y, n_y = yearly_view(view_ds)
+        curve_y = aspect_curve
     rows = [cosine_fit(med.sel(mountain_range=r).values, aspect) for r in view_ds["mountain_range"].values]
     clim = pd.DataFrame(rows, columns=["amp", "earliest_aspect_deg", "aspect_fit_r2"], index=_names(view_ds))
     clim.insert(0, "sunny_shady_d", 2 * clim.pop("amp"))
-    onset_y, n_y = yearly_view(view_ds)
-    yr = aspect_curve(onset_y, n_y)
+    yr = curve_y(onset_y, n_y)
     years = view_ds["water_year"].values.astype(int)
     fits = [[cosine_fit(yr.sel(mountain_range=r, water_year=y).values, aspect) for y in years]
             for r in view_ds["mountain_range"].values]
@@ -212,15 +249,16 @@ def lapse_rate_weighted_bins(view_ds, min_pixels=MIN_PIXELS_PER_BIN):
     return pd.Series(out, name="lapse_rate_weighted_bins_per_100m").rename_axis("name")
 
 
-def yearly_topography(view_ds):
-    """Range x water year lapse rate (d/100 m) and sunny-shady difference (2A, days), from :func:`yearly_view`."""
+def yearly_topography(view_ds, method=None):
+    """Range x water year lapse rate (d/100 m) and sunny-shady difference (2A, days; :func:`sunny_shady` ``method``),
+    from :func:`yearly_view`."""
     elevation = view_ds["elevation"].values
     onset_y, n_y = yearly_view(view_ds)
     years = view_ds["water_year"].values.astype(int)
     lapse = pd.DataFrame([[lapse_fit(onset_y.sel(mountain_range=r, water_year=y), n_y.sel(mountain_range=r, water_year=y),
                                      elevation) for y in years] for r in view_ds["mountain_range"].values],
                          index=_names(view_ds), columns=years)
-    _, amp, _ = sunny_shady(view_ds)
+    _, amp, _ = sunny_shady(view_ds, method)
     return lapse, amp
 
 
@@ -381,18 +419,22 @@ def evan_eisenman_expected(geometries, clim_ds, min_cells=3, tm=EE_TM, ram=EE_RA
 # ---------------------------------------------------------------------------------------------------------------
 # the seasonal arch: aspect amplitude per elevation band, by the band's melt date
 
-def band_aspect(view_ds):
+def band_aspect(view_ds, method=None):
     """Long table (range, water year or 'median', elevation band): the band's pixel count, aspect-mean onset and
-    cosine amplitude A / earliest azimuth of the band's own aspect profile (elevation-relative), for bands with at
-    least :data:`MIN_ASPECTS` aspect bins. Per-year rows use :func:`yearly_view`."""
+    cosine amplitude A / earliest azimuth of the band's aspect profile, for bands with at least :data:`MIN_ASPECTS`
+    aspect bins. The profile is the window-relative onset (``method="window"``, the default when the cube has it) or
+    the band's range-wide onset minus its median over aspects (``"pooled"``). Per-year rows use :func:`yearly_view`."""
+    method = aspect_method(view_ds, method)
     aspect, elev = view_ds["aspect"].values, view_ds["elevation"].values
     onset_y, n_y = yearly_view(view_ds)
+    if method == "window":
+        wrel_y, _ = yearly_view(view_ds, var="runoff_onset_wrel_wy")
 
-    def per_band(onset, n):
-        rel = (onset - onset.median("aspect")).values
+    def per_band(onset, n, profile=None):
+        rel = (onset - onset.median("aspect")).values if profile is None else profile.values
         w = n.where(onset.notnull())
         mean = ((onset * w).sum("aspect") / w.sum("aspect")).values
-        enough = (onset.notnull().sum("aspect") >= MIN_ASPECTS).values
+        enough = ((onset if profile is None else profile).notnull().sum("aspect") >= MIN_ASPECTS).values
         out = []
         for i in np.nonzero(enough)[0]:
             amp, az, _ = cosine_fit(rel[i], aspect)
@@ -404,10 +446,12 @@ def band_aspect(view_ds):
         med = view_ds["runoff_onset_median"].sel(mountain_range=r)
         n_med = view_ds["runoff_onset_median_n"].sel(mountain_range=r)
         px = n_med.where(med.notnull()).sum("aspect").to_series()
-        for e, m, a, z in per_band(med, n_med):
+        prof = view_ds["runoff_onset_wrel"].sel(mountain_range=r) if method == "window" else None
+        for e, m, a, z in per_band(med, n_med, prof):
             rows.append((str(r), "median", e, px[e], m, a, z))
         for y in view_ds["water_year"].values.astype(int):
-            for e, m, a, z in per_band(onset_y.sel(mountain_range=r, water_year=y), n_y.sel(mountain_range=r, water_year=y)):
+            prof_y = wrel_y.sel(mountain_range=r, water_year=y) if method == "window" else None
+            for e, m, a, z in per_band(onset_y.sel(mountain_range=r, water_year=y), n_y.sel(mountain_range=r, water_year=y), prof_y):
                 rows.append((str(r), str(y), e, px[e], m, a, z))
     return pd.DataFrame(rows, columns=["name", "water_year", "elevation", "median_pixels", "onset_dowy", "amp_d",
                                        "earliest_aspect_deg"])

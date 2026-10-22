@@ -916,7 +916,8 @@ _N_ALIAS = {"runoff_onset_anomaly": "runoff_onset_n",
             "runoff_onset_mad_std": "runoff_onset_mad_n",
             "n_years": "runoff_onset_median_n",
             "latitude_mean": "runoff_onset_median_n",
-            "chili_mean": "chili_corr_n"}
+            "chili_mean": "chili_corr_n",
+            "runoff_onset_wrel_std": "runoff_onset_wrel_n"}
 
 
 def counts_for(ds, var):

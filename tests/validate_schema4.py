@@ -96,6 +96,29 @@ def test_forest_groups():
     assert all(abs(v - 10) < 0.8 for v in res.values()), res
 
 
+def test_range_metrics():
+    """range_metrics on the synthetic tile: the window method (default on a schema-4 cube) recovers the +10 d
+    sunny-shady difference with the earliest onset on south-facing slopes, per range, per year and per band; the
+    pooled method (schema 3) does not."""
+    from gsro_analysis import range_metrics as rm
+    df = synthetic_table(boundary_m=520_000)
+    ds = aggregate.view(aggregate.sparse_from_frame(aggregate.tile_partials(df, WY, unit_types=["mountain_ranges"]), "mountain_ranges"),
+                        "mountain_ranges", ("elevation", "aspect"), WY)
+    ds = ds.assign_coords(mountain_range=["synthetic"])
+    v = rm.base_view(ds)
+    clim_w, yr_w, _ = rm.sunny_shady(v); clim_p, _, _ = rm.sunny_shady(v, method="pooled")
+    lapse, amp = rm.yearly_topography(v)
+    band = rm.band_aspect(v)
+    bm = band[band.water_year == "median"]
+    print(f"range_metrics: sunny-shady window {clim_w.sunny_shady_d.iloc[0]:.2f} d at {clim_w.earliest_aspect_deg.iloc[0]:.0f} deg "
+          f"(pooled {clim_p.sunny_shady_d.iloc[0]:.2f} d at {clim_p.earliest_aspect_deg.iloc[0]:.0f} deg) | per year "
+          f"{yr_w.min(axis=1).iloc[0]:.2f}..{yr_w.max(axis=1).iloc[0]:.2f} | yearly_topography amp {amp.mean(axis=1).iloc[0]:.2f} | "
+          f"bands 2A {2 * bm.amp_d.min():.2f}..{2 * bm.amp_d.max():.2f}")
+    assert abs(clim_w.sunny_shady_d.iloc[0] - 10) < 0.8 and abs(clim_w.earliest_aspect_deg.iloc[0] - 180) < 15
+    assert (yr_w.sub(10).abs() < 1.2).all(axis=None) and (amp.sub(10).abs() < 1.2).all(axis=None)
+    assert (bm.amp_d.mul(2).sub(10).abs() < 1.5).all()
+
+
 def load_module(path, name="aggregate_old"):
     spec = importlib.util.spec_from_file_location(name, path); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
     return mod
@@ -155,6 +178,7 @@ if __name__ == "__main__":
     test_synthetic(520_000, strict=True)
     test_synthetic(516_000, strict=False)
     test_forest_groups()
+    test_range_metrics()
     if args.tiles:
         res = real_tiles(args.tiles, args.old)
         if args.out: res.to_csv(args.out, index=False)
