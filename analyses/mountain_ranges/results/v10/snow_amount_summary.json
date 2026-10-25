@@ -1,0 +1,58 @@
+{
+ "min_years": 8,
+ "polar_lat": 60,
+ "ranges_with_min_years": 108,
+ "polar": {
+  "ranges": 21,
+  "r_SWE_positive": 21,
+  "median_r_SWE": 0.6470354703029709,
+  "median_rho_SWE": 0.5909090909090909,
+  "sig_SWE_positive": 15,
+  "sig_rho_SWE_positive": 9,
+  "median_partial_r_SWE_given_T": 0.725972569834168,
+  "median_partial_rho_SWE_given_T": 0.6558021165182881,
+  "median_r_T_SWE": -0.057521614488061645,
+  "median_rho_T_SWE": -0.06363636363636364,
+  "median_r_T": -0.41422398599089666,
+  "share_swe_beats_T": 0.7142857142857143,
+  "shared_year_null": {
+   "pearson": {
+    "ranges": 21,
+    "obs_sig_positive": 15,
+    "null_p95": 2.0,
+    "null_max": 7,
+    "p_value": 0.0004997501249375312,
+    "n_perm": 2000,
+    "seed": 0
+   },
+   "spearman": {
+    "ranges": 21,
+    "obs_sig_positive": 9,
+    "null_p95": 2.0,
+    "null_max": 5,
+    "p_value": 0.0004997501249375312,
+    "n_perm": 2000,
+    "seed": 0
+   },
+   "pearson_field_significance_check": {
+    "obs_sig_neg": 15,
+    "null_sig_neg_p95": 2.0,
+    "null_sig_neg_max": 7
+   }
+  },
+  "leave_one_year_out_median_r_SWE": {
+   "min": 0.6281480644150468,
+   "max": 0.6939606413734551
+  },
+  "coverage_ge_30pct": {
+   "ranges": 19,
+   "median_r_SWE": 0.6434903361686368
+  }
+ },
+ "_provenance": {
+  "_version": "v10",
+  "_git_sha": "5d35793",
+  "_analysis_git_sha": "4f70d4d",
+  "_written_at": "2026-10-23T00:53:05+00:00"
+ }
+}

@@ -212,13 +212,136 @@
    }
   }
  },
+ "sensitivity_min_8_years": {
+  "min_years": 8,
+  "n_with_fit": 108,
+  "ols": {
+   "pct_negative": 92.6,
+   "sig_negative": 64,
+   "sig_positive": 1,
+   "median_slope": -5.54,
+   "slope_iqr": [
+    -7.74,
+    -2.8
+   ],
+   "median_r": -0.67,
+   "ci_below_zero": 64,
+   "permutation_sig_negative": 64
+  },
+  "theil_sen": {
+   "pct_negative": 88.0,
+   "ci_below_zero": 51,
+   "ci_above_zero": 0,
+   "median_slope": -5.81,
+   "median_spearman_rho": -0.63
+  },
+  "by_abs_latitude_band": {
+   "0-35": {
+    "n": 15,
+    "median_slope": -4.85,
+    "pct_sig": 53.33,
+    "pct_negative": 100.0
+   },
+   "35-50": {
+    "n": 58,
+    "median_slope": -7.01,
+    "pct_sig": 74.14,
+    "pct_negative": 98.28
+   },
+   "50-60": {
+    "n": 14,
+    "median_slope": -6.38,
+    "pct_sig": 57.14,
+    "pct_negative": 92.86
+   },
+   "60-90": {
+    "n": 21,
+    "median_slope": -2.31,
+    "pct_sig": 28.57,
+    "pct_negative": 71.43
+   }
+  },
+  "positive_significant": [
+   [
+    "Verkhoyansk Range",
+    3.12,
+    0.64
+   ]
+  ],
+  "field_significance": {
+   "obs_sig_neg": 64,
+   "null_sig_neg_p95": 9.0,
+   "null_sig_neg_max": 18,
+   "obs_median_slope": -5.539,
+   "null_median_slope_min": -2.434,
+   "obs_frac_neg": 0.926,
+   "null_frac_neg_max": 0.806,
+   "n_perm": 1000,
+   "seed": 0
+  },
+  "short_record": {
+   "n": 23,
+   "years": {
+    "5": 7,
+    "6": 7,
+    "7": 9
+   },
+   "median_abs_latitude": 55.8,
+   "sig_negative": 3,
+   "by_abs_latitude_band": {
+    "35-50": {
+     "n": 4,
+     "median_slope": 3.09,
+     "pct_sig": 0.0,
+     "pct_negative": 25.0
+    },
+    "50-60": {
+     "n": 12,
+     "median_slope": -4.13,
+     "pct_sig": 16.67,
+     "pct_negative": 83.33
+    },
+    "60-90": {
+     "n": 7,
+     "median_slope": -2.49,
+     "pct_sig": 14.29,
+     "pct_negative": 71.43
+    }
+   },
+   "ranges": [
+    "Aldan Mountains",
+    "Arctic Cordillera",
+    "Bureya Region",
+    "Byrranga Mountains",
+    "Central Siberian Plateau",
+    "Chukotka Mountains",
+    "Eastern Sayan",
+    "Greater Khingan",
+    "James Region",
+    "Khentei-Daur Highlands",
+    "Kuznetsk Alatau",
+    "Lena-Angara Plateau",
+    "Lesser Khingan",
+    "Northern Baikal Mountains",
+    "Patom Highlands",
+    "Selenga Highlands",
+    "South Canadian Arctic Islands",
+    "Stanovoy Highlands",
+    "Stanovoy Range",
+    "Ural Mountains",
+    "Western Sayan",
+    "Yablonov Mountain System*",
+    "Yin Mountains"
+   ]
+  }
+ },
  "band_peak_sunny_shady_d": {
   "median": 16.0
  },
  "_provenance": {
   "_version": "v10",
   "_git_sha": "5d35793",
-  "_analysis_git_sha": "dcc094c",
-  "_written_at": "2026-10-22T19:52:00+00:00"
+  "_analysis_git_sha": "4f70d4d",
+  "_written_at": "2026-10-23T00:31:06+00:00"
  }
 }
